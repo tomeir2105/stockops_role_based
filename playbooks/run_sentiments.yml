@@ -1,0 +1,6 @@
+- name: Run sentiments stack
+  hosts: k3s_nodes
+  become: true
+  roles:
+  - deploy-sentiments
+  - deploy-finbert

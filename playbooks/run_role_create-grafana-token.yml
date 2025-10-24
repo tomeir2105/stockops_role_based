@@ -1,0 +1,5 @@
+- name: 'Run only role: create-grafana-token'
+  hosts: k3s_nodes
+  become: true
+  roles:
+  - create-grafana-token
