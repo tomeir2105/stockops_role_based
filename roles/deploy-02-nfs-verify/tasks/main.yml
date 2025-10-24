@@ -1,0 +1,62 @@
+- name: Ensure NFS client + setpriv are installed
+  ansible.builtin.apt:
+    name:
+    - nfs-common
+    - util-linux
+    state: present
+    update_cache: true
+- name: Create temporary mount dir for grafana
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: _nfs_check_grafana
+  register: td_graf
+- name: Create temporary mount dir for influxdb
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: _nfs_check_influxdb
+  register: td_infl
+- name: Mount grafana via NFSv4.2
+  ansible.builtin.command: 'mount -t nfs4 -o rw,vers=4.2 {{ nfs_server_ip }}:{{ export_root
+    }}/grafana {{ td_graf.path }}
+
+    '
+  register: m1
+  failed_when: m1.rc != 0 and 'already mounted' not in (m1.stderr|default('')) and
+    'already mounted' not in (m1.stdout|default(''))
+  changed_when: m1.rc == 0
+- name: Mount influxdb via NFSv4.2
+  ansible.builtin.command: 'mount -t nfs4 -o rw,vers=4.2 {{ nfs_server_ip }}:{{ export_root
+    }}/influxdb {{ td_infl.path }}
+
+    '
+  register: m2
+  failed_when: m2.rc != 0 and 'already mounted' not in (m2.stderr|default('')) and
+    'already mounted' not in (m2.stdout|default(''))
+  changed_when: m2.rc == 0
+- name: UID {{ grafana_uid }} can create a file in grafana dir
+  ansible.builtin.command:
+    cmd: setpriv --reuid {{ grafana_uid }} --regid {{ grafana_gid }} --clear-groups
+      touch {{ td_graf.path }}/_verify_write.txt
+- name: UID {{ influx_uid }} can create a file in influxdb dir
+  ansible.builtin.command:
+    cmd: setpriv --reuid {{ influx_uid }} --regid {{ influx_gid }} --clear-groups
+      touch {{ td_infl.path }}/_verify_write.txt
+- name: Unmount (ignore errors)
+  ansible.builtin.command: umount -fl {{ item }}
+  loop:
+  - '{{ td_graf.path }}'
+  - '{{ td_infl.path }}'
+  register: um
+  failed_when: false
+  changed_when: '''not mounted'' not in (um.stderr|default('''')) and ''not mounted''
+    not in (um.stdout|default(''''))
+
+    '
+- name: Remove temporary mount dirs
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+  - '{{ td_graf.path }}'
+  - '{{ td_infl.path }}'
+  ignore_errors: true

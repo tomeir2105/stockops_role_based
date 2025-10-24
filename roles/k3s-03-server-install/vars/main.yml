@@ -1,0 +1,4 @@
+k3s_server_ip: '{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname)
+  }}'
+k3s_async_timeout: 1800
+k3s_poll_interval: 10

@@ -1,0 +1,5 @@
+k3s_server_ip: '{{ hostvars[groups[''k3s_server''][0]].ansible_host | default(groups[''k3s_server''][0])
+  }}'
+k3s_async_timeout: 3600
+k3s_poll_interval: 15
+k3s_server_host: '{{ groups[''k3s_server''][0] }}'

@@ -1,0 +1,4 @@
+jenkins_dir: '{{ (APP_DIRS | selectattr(''path'',''search'',''/jenkins$'') | list
+  | first) }}'
+workdir: /tmp/jenkins
+jenkins_sa: jenkins-sa

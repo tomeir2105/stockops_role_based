@@ -1,0 +1,7 @@
+- name: Scale CoreDNS deployment to 2 replicas
+  kubernetes.core.k8s_scale:
+    api_version: apps/v1
+    kind: Deployment
+    name: coredns
+    namespace: kube-system
+    replicas: 2

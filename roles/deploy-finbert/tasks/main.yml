@@ -1,0 +1,145 @@
+- name: Write minimal registries.yaml with no auth
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    owner: root
+    group: root
+    mode: '0644'
+    content: "mirrors:\n  docker.io:\n    endpoint:\n      - https://registry-1.docker.io\n\
+      configs: {}\n"
+  notify: restart k3s
+- name: Ensure a clean ServiceAccount without imagePullSecrets
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: public-pull
+        namespace: '{{ FINBERT_NAMESPACE }}'
+- name: Delete old finbert-api Deployment (reapply spec cleanly)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: apps/v1
+    kind: Deployment
+    name: '{{ FINBERT_APP_NAME }}'
+    namespace: '{{ FINBERT_NAMESPACE }}'
+  ignore_errors: true
+- name: Create/Update finbert-api Deployment
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: '{{ FINBERT_APP_NAME }}'
+        namespace: '{{ FINBERT_NAMESPACE }}'
+        labels:
+          app: '{{ FINBERT_APP_NAME }}'
+      spec:
+        replicas: '{{ FINBERT_REPLICAS }}'
+        strategy:
+          type: Recreate
+        selector:
+          matchLabels:
+            app: '{{ FINBERT_APP_NAME }}'
+        template:
+          metadata:
+            labels:
+              app: '{{ FINBERT_APP_NAME }}'
+          spec:
+            nodeSelector: '{{ FINBERT_NODE_SELECTOR }}'
+            securityContext:
+              runAsUser: '{{ finbert_dir_spec.owner | int }}'
+              runAsGroup: '{{ finbert_dir_spec.group | int }}'
+              fsGroup: '{{ finbert_dir_spec.group | int }}'
+              fsGroupChangePolicy: OnRootMismatch
+            serviceAccountName: public-pull
+            restartPolicy: Always
+            containers:
+            - name: finbert
+              image: python:3.12-slim
+              imagePullPolicy: IfNotPresent
+              env:
+              - name: HOME
+                value: /app
+              - name: HF_HOME
+                value: /app/models
+              - name: TRANSFORMERS_CACHE
+                value: /app/models
+              - name: HF_HUB_OFFLINE
+                value: '{{ ''1'' if FINBERT_ENV_OFFLINE else ''0'' }}'
+              - name: TRANSFORMERS_OFFLINE
+                value: '{{ ''1'' if FINBERT_ENV_OFFLINE else ''0'' }}'
+              - name: LOG_DIR
+                value: /app/logs
+              - name: TMPDIR
+                value: /app/tmp
+              command:
+              - /bin/sh
+              - -lc
+              args:
+              - 'set -e; if [ ! -d /app/.venv ]; then python -m venv /app/.venv &&
+                /app/.venv/bin/python -m ensurepip --upgrade; fi && /app/.venv/bin/python
+                -m pip install --no-cache-dir -r /app/requirements.txt && exec /app/.venv/bin/uvicorn
+                server:app --host 0.0.0.0 --port {{ FINBERT_CONTAINER_PORT }}
+
+                '
+              ports:
+              - containerPort: '{{ FINBERT_CONTAINER_PORT }}'
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: '{{ FINBERT_CONTAINER_PORT }}'
+                initialDelaySeconds: 5
+                periodSeconds: 3
+                failureThreshold: 10
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: '{{ FINBERT_CONTAINER_PORT }}'
+                initialDelaySeconds: 10
+                periodSeconds: 10
+              resources:
+                requests:
+                  cpu: '{{ FINBERT_REQ_CPU }}'
+                  memory: '{{ FINBERT_REQ_MEM }}'
+                limits:
+                  cpu: '{{ FINBERT_LIM_CPU }}'
+                  memory: '{{ FINBERT_LIM_MEM }}'
+              volumeMounts:
+              - name: finbert-data
+                mountPath: /app
+                subPath: finbert
+              - name: finbert-data
+                mountPath: /app/models
+                subPath: finbert/models
+              - name: finbert-data
+                mountPath: /app/logs
+                subPath: finbert/logs
+              - name: finbert-data
+                mountPath: /app/tmp
+                subPath: finbert/tmp
+            volumes:
+            - name: finbert-data
+              persistentVolumeClaim:
+                claimName: '{{ finbert_pvc_name }}'
+- name: Create/Update finbert-api Service (NodePort)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: '{{ FINBERT_APP_NAME }}'
+        namespace: '{{ FINBERT_NAMESPACE }}'
+        labels:
+          app: '{{ FINBERT_APP_NAME }}'
+      spec:
+        type: '{{ FINBERT_SERVICE_TYPE }}'
+        selector:
+          app: '{{ FINBERT_APP_NAME }}'
+        ports:
+        - name: http
+          port: '{{ FINBERT_SERVICE_PORT }}'
+          targetPort: '{{ FINBERT_CONTAINER_PORT }}'
+          nodePort: '{{ FINBERT_NODEPORT }}'

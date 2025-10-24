@@ -1,0 +1,5 @@
+- name: Run news stack
+  hosts: k3s_nodes
+  become: true
+  roles:
+  - run-news-pod

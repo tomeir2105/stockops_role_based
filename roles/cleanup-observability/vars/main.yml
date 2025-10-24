@@ -1,0 +1,5 @@
+ns: '{{ NAMESPACE | default(''observability'') }}'
+pv_names:
+- grafana-pv
+- influxdb-pv
+- jenkins-pv

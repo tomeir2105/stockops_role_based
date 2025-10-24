@@ -1,0 +1,5 @@
+org_name: '{{ MONITOR_ORG | default(''monitor'') }}'
+bucket_name: '{{ MONITOR_BUCKET | default(''k3s_pods_1w'') }}'
+retention_seconds: 604800
+influx_url: '{{ INFLUXDB_URL }}'
+influx_token: '{{ MONITOR_TOKEN | default(INFLUXDB_ADMIN_TOKEN) }}'

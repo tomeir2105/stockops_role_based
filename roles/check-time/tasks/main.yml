@@ -1,0 +1,6 @@
+- name: Get date and time on each node
+  ansible.builtin.command: date +"%Y-%m-%d %H:%M:%S %Z"
+  register: date_out
+- name: Print node time
+  ansible.builtin.debug:
+    msg: '{{ inventory_hostname }} → {{ date_out.stdout }}'

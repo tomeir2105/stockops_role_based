@@ -1,0 +1,149 @@
+- name: Assert required variables exist
+  ansible.builtin.assert:
+    that:
+    - influx_url is defined and influx_url | length > 0
+    - influx_token is defined and influx_token | length > 0
+    - org_name is defined and org_name | length > 0
+    - bucket_name is defined and bucket_name | length > 0
+    fail_msg: 'Missing one of: INFLUXDB_URL, token (MONITOR_TOKEN/INFLUXDB_ADMIN_TOKEN),
+      MONITOR_ORG, MONITOR_BUCKET'
+- name: Show effective settings
+  ansible.builtin.debug:
+    msg:
+      influx_url: '{{ influx_url }}'
+      org_name: '{{ org_name }}'
+      bucket_name: '{{ bucket_name }}'
+- name: Check /health
+  ansible.builtin.uri:
+    url: '{{ influx_url }}/health'
+    method: GET
+    return_content: true
+    status_code: 200
+    timeout: 10
+  register: health
+- name: Lookup org by name
+  ansible.builtin.uri:
+    url: '{{ influx_url }}/api/v2/orgs?org={{ org_name | urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ influx_token }}
+      Accept: application/json
+    return_content: true
+    status_code: 200
+  register: org_lookup
+- name: Extract org_id (fail if not found)
+  ansible.builtin.set_fact:
+    org_id: '{{ (org_lookup.json.orgs | selectattr(''name'',''equalto'', org_name)
+      | list | first).id | default('''') }}'
+- name: Fail clearly if org not found (token may not have access to this org)
+  ansible.builtin.assert:
+    that:
+    - org_id | length > 0
+    fail_msg: Org '{{ org_name }}' not found or token lacks access. Ensure the token
+      is scoped to org '{{ org_name }}'.
+- name: Lookup bucket by name in org
+  ansible.builtin.uri:
+    url: '{{ influx_url }}/api/v2/buckets?orgID={{ org_id }}&name={{ bucket_name |
+      urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ influx_token }}
+      Accept: application/json
+    return_content: true
+    status_code:
+    - 200
+    - 404
+  register: bucket_lookup
+- name: Determine existence and current retention (no json_query)
+  ansible.builtin.set_fact:
+    bucket_exists: '{{ (bucket_lookup.status | int == 200) and ((bucket_lookup.json.buckets
+      | default([])) | length > 0) }}'
+    bucket_id: '{{ (bucket_lookup.json.buckets | default([]) | map(attribute=''id'')
+      | list | first) | default('''') }}'
+    _bucket0: '{{ (bucket_lookup.json.buckets | default([]) | first) | default({})
+      }}'
+    current_retention: "{{\n  (\n    (_bucket0.retentionRules | default([]) | first\
+      \ | default({})).everySeconds\n    | default(0)\n  ) | int\n}}"
+- name: Create bucket if missing (handle auth errors clearly)
+  ansible.builtin.uri:
+    url: '{{ influx_url }}/api/v2/buckets'
+    method: POST
+    headers:
+      Authorization: Token {{ influx_token }}
+      Content-Type: application/json
+      Accept: application/json
+    body_format: json
+    body:
+      name: '{{ bucket_name }}'
+      orgID: '{{ org_id }}'
+      retentionRules:
+      - type: expire
+        everySeconds: '{{ retention_seconds }}'
+    status_code:
+    - 201
+    - 409
+    - 401
+    - 403
+  register: create_attempt
+  when: not bucket_exists
+  changed_when: create_attempt.status | int == 201
+- name: Fail if create was unauthorized (use a monitor-scoped token)
+  ansible.builtin.fail:
+    msg: 'Failed to create bucket ''{{ bucket_name }}'' in org ''{{ org_name }}'':
+      HTTP {{ create_attempt.status }} (token lacks permissions).  Use a token scoped
+      to org ''{{ org_name }}'' (e.g., MONITOR_TOKEN) with buckets read/write.'
+  when:
+  - not bucket_exists
+  - create_attempt.status is defined
+  - create_attempt.status | int in [401, 403]
+- name: Re-fetch bucket after create (or if existed) to get final retention
+  ansible.builtin.uri:
+    url: '{{ influx_url }}/api/v2/buckets?orgID={{ org_id }}&name={{ bucket_name |
+      urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ influx_token }}
+      Accept: application/json
+    return_content: true
+    status_code: 200
+  register: bucket_final
+- name: Extract final bucket info
+  ansible.builtin.set_fact:
+    bucket_id: '{{ (bucket_final.json.buckets | default([]) | map(attribute=''id'')
+      | list | first) | default('''') }}'
+    final_retention: "{{\n  (\n    ((bucket_final.json.buckets | default([]) | first)\
+      \ | default({})).retentionRules\n    | default([]) | first | default({})\n \
+      \ ).everySeconds | default(0) | int\n}}"
+- name: Update retention if different (handle auth errors)
+  ansible.builtin.uri:
+    url: '{{ influx_url }}/api/v2/buckets/{{ bucket_id }}'
+    method: PATCH
+    headers:
+      Authorization: Token {{ influx_token }}
+      Content-Type: application/json
+      Accept: application/json
+    body_format: json
+    body:
+      retentionRules:
+      - type: expire
+        everySeconds: '{{ retention_seconds }}'
+    status_code:
+    - 200
+    - 401
+    - 403
+  register: patch_attempt
+  when:
+  - (final_retention | int) != (retention_seconds | int)
+  changed_when: patch_attempt.status | int == 200
+- name: Fail if patch was unauthorized (use a monitor-scoped token)
+  ansible.builtin.fail:
+    msg: 'Failed to update retention on bucket ''{{ bucket_name }}'' in org ''{{ org_name
+      }}'': HTTP {{ patch_attempt.status }} (token lacks permissions).'
+  when:
+  - (final_retention | int) != (retention_seconds | int)
+  - patch_attempt.status is defined
+  - patch_attempt.status | int in [401, 403]
+- name: Success summary
+  ansible.builtin.debug:
+    msg: Bucket '{{ bucket_name }}' in org '{{ org_name }}' ensured with retention={{
+      retention_seconds }}s at {{ influx_url }}

@@ -1,0 +1,7 @@
+ns: '{{ NAMESPACE }}'
+nfs_server_ip: '{{ NFS_SERVER_IP }}'
+access_modes_map:
+  grafana:
+  - ReadWriteMany
+  influxdb:
+  - ReadWriteOnce

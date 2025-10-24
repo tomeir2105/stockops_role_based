@@ -1,0 +1,40 @@
+- name: Get all pods
+  ansible.builtin.shell: 'set -euo pipefail
+
+    K="kubectl"; command -v kubectl >/dev/null 2>&1 || K="k3s kubectl"
+
+    $K --kubeconfig {{ kubeconfig_path }} get pods -A --no-headers
+
+    '
+  args:
+    executable: /bin/bash
+  register: pods
+  changed_when: false
+- name: Verify all pods are Running (ignore Terminating/Deleted)
+  ansible.builtin.shell: "set -euo pipefail\nK=\"kubectl\"; command -v kubectl >/dev/null\
+    \ 2>&1 || K=\"k3s kubectl\"\n# List pods that are NOT Running/Succeeded AND are\
+    \ NOT being deleted.\n$K --kubeconfig {{ kubeconfig_path }} get pods -A \\\n \
+    \ -o jsonpath='{range .items[?(@.metadata.deletionTimestamp==null && @.status.phase!=\"\
+    Running\" && @.status.phase!=\"Succeeded\")]}{.metadata.namespace}{\"\\t\"}{.metadata.name}{\"\
+    \\t\"}{.status.phase}{\"\\n\"}{end}'\n"
+  args:
+    executable: /bin/bash
+  register: not_running
+  changed_when: false
+  failed_when: not_running.stdout | trim | length > 0
+- name: Verify required components exist
+  ansible.builtin.shell: "missing=0\nfor s in {{ required_strings | join(' ') }};\
+    \ do\n  if ! echo \"{{ pods.stdout }}\" | grep -q \"$s\"; then\n    echo \"Missing\
+    \ component: $s\"\n    missing=1\n  fi\ndone\nexit $missing\n"
+  args:
+    executable: /bin/bash
+  register: missing_check
+  changed_when: false
+  failed_when: missing_check.rc != 0
+- name: All pods are Running and all components are present
+  ansible.builtin.debug:
+    msg: All pods are Running and all key components (coredns, provisioner, traefik×4,
+      grafana, influxdb, jenkins) are present.
+  when:
+  - not_running.stdout | trim | length == 0
+  - missing_check.rc == 0

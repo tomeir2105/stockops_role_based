@@ -1,0 +1,9 @@
+- name: Run environment stack
+  hosts: all
+  become: true
+  roles:
+  - k3s-01-common-tasks
+  - deploy-01-nfs-export
+  - check-time
+  - vars
+  - check-connectivity

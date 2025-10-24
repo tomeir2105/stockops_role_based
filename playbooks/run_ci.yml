@@ -1,0 +1,5 @@
+- name: Run ci stack
+  hosts: k3s_router
+  become: true
+  roles:
+  - deploy-jenkins

@@ -1,0 +1,8 @@
+- name: Run monitoring stack
+  hosts: k3s_nodes
+  become: true
+  roles:
+  - check-influxdb
+  - create-grafana-token
+  - install-netdata
+  - check-influxdb

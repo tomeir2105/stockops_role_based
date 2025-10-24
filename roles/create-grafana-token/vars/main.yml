@@ -1,0 +1,4 @@
+grafana_api_url: '{{ GRAFANA_URL | regex_replace(''/+$'', '''') }}/api/auth/keys'
+grafana_user: '{{ GRAFANA_ADMIN_USER }}'
+grafana_pass: '{{ GRAFANA_ADMIN_PASSWORD }}'
+token_name: ansible-token

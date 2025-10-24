@@ -1,0 +1,92 @@
+- name: Ensure namespace exists (idempotent)
+  ansible.builtin.shell: 'kubectl create ns {{ ns }} --dry-run=client -o yaml | kubectl
+    apply -f -
+
+    '
+  args:
+    executable: /bin/bash
+  register: ns_result
+  changed_when: '''created'' in (ns_result.stdout | default('''')) or ''configured''
+    in (ns_result.stdout | default(''''))'
+- name: Create PersistentVolume for InfluxDB
+  ansible.builtin.shell: "cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind:\
+    \ PersistentVolume\nmetadata:\n  name: influxdb-pv\nspec:\n  capacity:\n    storage:\
+    \ {{ INFLUXDB_STORAGE }}\n  accessModes:\n    - ReadWriteOnce\n  persistentVolumeReclaimPolicy:\
+    \ Retain\n  storageClassName: manual\n  nfs:\n    server: {{ nfs_server_ip }}\n\
+    \    path: {{ influx_pv_path }}\nEOF\n"
+  args:
+    executable: /bin/bash
+- name: Create PersistentVolumeClaim for InfluxDB
+  ansible.builtin.shell: "cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind:\
+    \ PersistentVolumeClaim\nmetadata:\n  name: influxdb-pvc\n  namespace: {{ ns }}\n\
+    spec:\n  accessModes:\n    - ReadWriteOnce\n  storageClassName: manual\n  resources:\n\
+    \    requests:\n      storage: {{ INFLUXDB_STORAGE }}\n  volumeName: influxdb-pv\n\
+    EOF\n"
+  args:
+    executable: /bin/bash
+- name: Create PersistentVolume for Grafana
+  ansible.builtin.shell: "cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind:\
+    \ PersistentVolume\nmetadata:\n  name: grafana-pv\nspec:\n  capacity:\n    storage:\
+    \ {{ GRAFANA_STORAGE }}\n  accessModes:\n    - ReadWriteOnce\n  persistentVolumeReclaimPolicy:\
+    \ Retain\n  storageClassName: manual\n  nfs:\n    server: {{ nfs_server_ip }}\n\
+    \    path: {{ grafana_pv_path }}\nEOF\n"
+  args:
+    executable: /bin/bash
+- name: Create PersistentVolumeClaim for Grafana
+  ansible.builtin.shell: "cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind:\
+    \ PersistentVolumeClaim\nmetadata:\n  name: grafana-pvc\n  namespace: {{ ns }}\n\
+    spec:\n  accessModes:\n    - ReadWriteOnce\n  storageClassName: manual\n  resources:\n\
+    \    requests:\n      storage: {{ GRAFANA_STORAGE }}\n  volumeName: grafana-pv\n\
+    EOF\n"
+  args:
+    executable: /bin/bash
+- name: Deploy InfluxDB
+  ansible.builtin.shell: "kubectl -n {{ ns }} apply -f - <<'EOF'\napiVersion: apps/v1\n\
+    kind: Deployment\nmetadata:\n  name: influxdb\n  labels:\n    app: influxdb\n\
+    spec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: influxdb\n  template:\n\
+    \    metadata:\n      labels:\n        app: influxdb\n    spec:\n      securityContext:\n\
+    \        runAsUser: 1000\n        runAsGroup: 1000\n        fsGroup: 1000\n  \
+    \      fsGroupChangePolicy: \"OnRootMismatch\"\n      containers:\n        - name:\
+    \ influxdb\n          image: influxdb:2.7\n          ports:\n            - containerPort:\
+    \ 8086\n          volumeMounts:\n            - name: influx-storage\n        \
+    \      mountPath: /var/lib/influxdb2\n          env:\n            - name: DOCKER_INFLUXDB_INIT_MODE\n\
+    \              value: setup\n            - name: DOCKER_INFLUXDB_INIT_USERNAME\n\
+    \              value: \"{{ INFLUXDB_ADMIN_USER }}\"\n            - name: DOCKER_INFLUXDB_INIT_PASSWORD\n\
+    \              value: \"{{ INFLUXDB_ADMIN_PASSWORD }}\"\n            - name: DOCKER_INFLUXDB_INIT_ORG\n\
+    \              value: \"{{ INFLUXDB_ORG }}\"\n            - name: DOCKER_INFLUXDB_INIT_BUCKET\n\
+    \              value: \"{{ INFLUXDB_BUCKET }}\"\n            - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN\n\
+    \              value: \"{{ INFLUXDB_ADMIN_TOKEN }}\"\n      volumes:\n       \
+    \ - name: influx-storage\n          persistentVolumeClaim:\n            claimName:\
+    \ influxdb-pvc\nEOF\n"
+  args:
+    executable: /bin/bash
+- name: Create InfluxDB NodePort service
+  ansible.builtin.shell: "kubectl -n {{ ns }} apply -f - <<'EOF'\napiVersion: v1\n\
+    kind: Service\nmetadata:\n  name: influxdb\nspec:\n  selector:\n    app: influxdb\n\
+    \  ports:\n    - name: http\n      port: 8086\n      targetPort: 8086\n      nodePort:\
+    \ {{ INFLUX_NODEPORT }}\n  type: NodePort\nEOF\n"
+  args:
+    executable: /bin/bash
+- name: Deploy Grafana with PVC
+  ansible.builtin.shell: "kubectl -n {{ ns }} apply -f - <<'EOF'\napiVersion: apps/v1\n\
+    kind: Deployment\nmetadata:\n  name: grafana\n  labels:\n    app: grafana\nspec:\n\
+    \  replicas: 1\n  selector:\n    matchLabels:\n      app: grafana\n  template:\n\
+    \    metadata:\n      labels:\n        app: grafana\n    spec:\n      securityContext:\n\
+    \        runAsUser: 472\n        runAsGroup: 472\n        fsGroup: 472\n     \
+    \   fsGroupChangePolicy: \"OnRootMismatch\"\n      containers:\n        - name:\
+    \ grafana\n          image: grafana/grafana:10.4.0\n          ports:\n       \
+    \     - containerPort: 3000\n          volumeMounts:\n            - name: grafana-storage\n\
+    \              mountPath: /var/lib/grafana\n          env:\n            - name:\
+    \ GF_SECURITY_ADMIN_USER\n              value: \"{{ GRAFANA_ADMIN_USER }}\"\n\
+    \            - name: GF_SECURITY_ADMIN_PASSWORD\n              value: \"{{ GRAFANA_ADMIN_PASSWORD\
+    \ }}\"\n      volumes:\n        - name: grafana-storage\n          persistentVolumeClaim:\n\
+    \            claimName: grafana-pvc\nEOF\n"
+  args:
+    executable: /bin/bash
+- name: Create Grafana NodePort service
+  ansible.builtin.shell: "kubectl -n {{ ns }} apply -f - <<'EOF'\napiVersion: v1\n\
+    kind: Service\nmetadata:\n  name: grafana\nspec:\n  selector:\n    app: grafana\n\
+    \  ports:\n    - name: http\n      port: 3000\n      targetPort: 3000\n      nodePort:\
+    \ {{ GRAFANA_NODEPORT }}\n  type: NodePort\nEOF\n"
+  args:
+    executable: /bin/bash

@@ -1,0 +1,3 @@
+- name: Placeholder for check-all.yml — no tasks extracted
+  debug:
+    msg: Convert check-all.yml into proper role tasks.

@@ -1,0 +1,3 @@
+- name: Placeholder for k3s-99-utils.yml — no tasks extracted
+  debug:
+    msg: Convert k3s-99-utils.yml into proper role tasks.

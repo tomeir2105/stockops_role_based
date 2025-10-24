@@ -1,0 +1,3 @@
+kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+test_plugins: '{{ (JENKINS_PLUGINS | default([])) | join('' '') }}'
+do_restart: '{{ JENKINS_SAFE_RESTART | default(true) }}'

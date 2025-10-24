@@ -1,0 +1,201 @@
+- name: Pick kubectl or 'k3s kubectl'
+  shell: command -v kubectl >/dev/null 2>&1 && echo kubectl || echo 'k3s kubectl'
+  args:
+    executable: /bin/bash
+  register: kubectl_cmd
+  changed_when: false
+- name: Resolve node IP (first IP from hostname -I)
+  shell: hostname -I | awk '{print $1}'
+  args:
+    executable: /bin/bash
+  register: node_ip_cmd
+  changed_when: false
+- name: Detect InfluxDB service name
+  shell: "set -e\nk=\"{{ kubectl_cmd.stdout }}\"\nif $k -n {{ ns }} get svc influxdb\
+    \ >/dev/null 2>&1; then\n  echo influxdb\nelif $k -n {{ ns }} get svc influxdb-nodeport\
+    \ >/dev/null 2>&1; then\n  echo influxdb-nodeport\nelse\n  echo \"\"\nfi\n"
+  args:
+    executable: /bin/bash
+  register: influx_svc
+  changed_when: false
+- name: Fail if service not found
+  fail:
+    msg: Could not find Service 'influxdb' or 'influxdb-nodeport' in namespace '{{
+      ns }}'.
+  when: influx_svc.stdout | trim == ""
+- name: Get service JSON
+  shell: '{{ kubectl_cmd.stdout }} -n {{ ns }} get svc {{ influx_svc.stdout }} -o
+    json'
+  args:
+    executable: /bin/bash
+  register: svc_json
+  changed_when: false
+- name: Parse service JSON to _svc
+  set_fact:
+    _svc: '{{ svc_json.stdout | from_json }}'
+- name: Derive service details from _svc
+  set_fact:
+    _has_clusterip: "{{\n  (_svc.spec.clusterIP is defined)\n  and (_svc.spec.clusterIP\
+      \ | length > 0)\n  and (_svc.spec.clusterIP != 'None')\n}}"
+    _port: '{{ (_svc.spec.ports | first).port }}'
+    _nodeport: '{{ (((_svc.spec.ports | first).nodePort) | default(0)) | int }}'
+    _clusterip: '{{ _svc.spec.clusterIP | default('''') }}'
+- name: Ensure we have a usable target (ClusterIP or NodePort)
+  fail:
+    msg: Service has no ClusterIP and no NodePort; cannot build URL.
+  when: (not _has_clusterip) and (_nodeport | int == 0)
+- name: Prefer ClusterIP if available; otherwise use NodePort on this node IP
+  set_fact:
+    INFLUXDB_URL: "{{\n  (_has_clusterip | bool)\n  | ternary(\n      'http://' ~\
+      \ _clusterip ~ ':' ~ (_port | string),\n      'http://' ~ (node_ip_cmd.stdout\
+      \ | trim).split()[0] ~ ':' ~ (_nodeport | string)\n    )\n}}"
+- debug:
+    msg: InfluxDB detected at {{ INFLUXDB_URL }} (svc={{ influx_svc.stdout }}, clusterIP={{
+      _clusterip }}, port={{ _port }}, nodePort={{ _nodeport }})
+- name: Build selector string from Service.spec.selector
+  set_fact:
+    _selector_map: '{{ _svc.spec.selector | default({}) }}'
+    _selector_str: "{{\n  (_svc.spec.selector | default({}))\n  | dict2items\n  |\
+      \ map('join', '=')\n  | list\n  | join(',')\n}}"
+- name: Debug service selector and namespace
+  debug:
+    msg: ns={{ ns }} svc={{ influx_svc.stdout }} selector={{ _selector_str | default('(none)')
+      }}
+- name: Fail if Service has no selector (cannot discover pods automatically)
+  fail:
+    msg: Service {{ influx_svc.stdout }} in ns {{ ns }} has no selector; cannot wait
+      for pods. Check your Service definition.
+  when: _selector_str | length == 0
+- name: List pods matching selector (for visibility)
+  shell: '{{ kubectl_cmd.stdout }} -n {{ ns }} get pods -l {{ _selector_str }} -o
+    wide'
+  args:
+    executable: /bin/bash
+  register: pods_list
+  changed_when: false
+- name: Show pods list
+  debug:
+    var: pods_list.stdout
+- name: Wait for pods to be Ready (selector-based)
+  shell: '{{ kubectl_cmd.stdout }} -n {{ ns }} wait --for=condition=ready pod -l {{
+    _selector_str }} --timeout=180s'
+  args:
+    executable: /bin/bash
+  register: wait_ready
+  retries: 2
+  delay: 10
+  until: wait_ready.rc == 0
+  changed_when: false
+- name: Verify service now has endpoints
+  shell: '{{ kubectl_cmd.stdout }} -n {{ ns }} get endpoints {{ influx_svc.stdout
+    }} -o jsonpath=''{.subsets[*].addresses[*].ip}''
+
+    '
+  args:
+    executable: /bin/bash
+  register: ep_ips
+  changed_when: false
+  failed_when: (ep_ips.stdout | trim) == ""
+- name: Wait for TCP to open
+  wait_for:
+    host: '{{ (INFLUXDB_URL | regex_replace(''^https?://'', '''')).split('':'')[0]
+      }}'
+    port: '{{ (INFLUXDB_URL.split('':'')[-1]) | int }}'
+    timeout: 60
+    state: started
+- name: Lookup org by name (retry while InfluxDB warms up)
+  uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/orgs?org={{ INFLUXDB_ORG | urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+    return_content: true
+    status_code: 200
+  register: org_lookup
+  retries: 10
+  delay: 3
+  until: org_lookup.status == 200
+- name: Set org_id if found
+  set_fact:
+    org_id: '{{ (org_lookup.json.orgs | selectattr(''name'',''equalto'', INFLUXDB_ORG)
+      | list | first).id | default('''') }}'
+- name: Create org if missing
+  uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/orgs'
+    method: POST
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Content-Type: application/json
+    body_format: json
+    body:
+      name: '{{ INFLUXDB_ORG }}'
+    return_content: true
+    status_code: 201
+  register: org_create
+  when: org_id == ""
+- name: Use created org id (or keep existing)
+  set_fact:
+    org_id: '{{ org_id if org_id != '''' else org_create.json.id }}'
+- name: Lookup bucket by name (404 means not found on OSS)
+  uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets?name={{ INFLUXDB_BUCKET | urlencode }}&orgID={{
+      org_id }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+    return_content: true
+    status_code:
+    - 200
+    - 404
+  register: bucket_lookup
+- name: Decide if bucket exists
+  set_fact:
+    bucket_exists: "{{\n  (bucket_lookup.status == 200)\n  and ((bucket_lookup.json.buckets\
+      \ | default([])) | length > 0)\n}}"
+- name: Create bucket if missing
+  uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets'
+    method: POST
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Content-Type: application/json
+    body_format: json
+    body:
+      name: '{{ INFLUXDB_BUCKET }}'
+      orgID: '{{ org_id }}'
+      retentionRules:
+      - type: expire
+        everySeconds: 0
+    return_content: true
+    status_code:
+    - 201
+    - 409
+  when: not bucket_exists
+- name: Retrieve final org info
+  uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/orgs/{{ org_id }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+    return_content: true
+    status_code: 200
+  register: org_final
+- name: Retrieve final bucket info
+  uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets?orgID={{ org_id }}&name={{ INFLUXDB_BUCKET
+      | urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+    return_content: true
+    status_code:
+    - 200
+    - 404
+  register: bucket_final
+- name: Print summary
+  debug:
+    msg: "InfluxDB organization and bucket configuration complete\n\nOrganization:\n\
+      \  Name: {{ org_final.json.name }}\n  ID:   {{ org_final.json.id }}\n\nBucket:\n\
+      \  Name: {{ (bucket_final.json.buckets[0].name | default(INFLUXDB_BUCKET)) }}\n\
+      \  ID:   {{ (bucket_final.json.buckets[0].id | default('N/A')) }}\n\nInfluxDB\
+      \ URL: {{ INFLUXDB_URL }}\n"

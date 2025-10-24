@@ -1,0 +1,10 @@
+_home: '{{ ansible_user_dir | default(lookup(''env'',''HOME'')) }}'
+ssh_dir: '{{ _home }}/.ssh'
+ssh_key_name: '{{ SSH_KEY_NAME | default(''ansible_ed25519'') }}'
+key_path: '{{ ssh_dir }}/{{ ssh_key_name }}'
+known_hosts_path: '{{ ssh_dir }}/known_hosts'
+names: '{{ groups.k3s_server + groups.k3s_workers }}'
+ips_from_group: '{{ groups.ssh_scan_hosts }}'
+target_user: '{{ TARGET_USER | default(ansible_user | default(''user'')) }}'
+controller_pubkey: '{{ lookup(''file'', ''~/.ssh/'' ~ (SSH_KEY_NAME | default(''ansible_ed25519''))
+  ~ ''.pub'') }}'

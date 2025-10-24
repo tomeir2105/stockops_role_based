@@ -1,0 +1,1 @@
+app_paths_eff: '{{ APP_DIRS | map(attribute=''path'') | list }}'

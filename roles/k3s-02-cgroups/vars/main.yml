@@ -1,0 +1,5 @@
+required_flags:
+- cgroup_memory=1
+- cgroup_enable=memory
+- systemd.unified_cgroup_hierarchy=1
+cmdline_path: /boot/firmware/cmdline.txt

@@ -1,0 +1,219 @@
+- name: Ensure sentiments directory per APP_DIRS
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner }}'
+    group: '{{ item.group }}'
+    mode: '{{ item.mode }}'
+  loop: '{{ APP_DIRS | selectattr(''path'',''equalto'', sentiments_dir) | list }}'
+  loop_control:
+    label: '{{ item.path }}'
+- name: Reset checkpoint file (truncate to empty JSON)
+  ansible.builtin.copy:
+    dest: '{{ SENTIMENTS_CHECKPOINT_PATH }}'
+    content: '{}
+
+      '
+    owner: 1000
+    group: 1000
+    mode: '0660'
+- name: Ensure namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: '{{ ns }}'
+- name: Delete Job sentiments-run (if exists)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    namespace: '{{ ns }}'
+    name: sentiments-run
+  tags:
+  - sentiments_reset
+- name: List pods with label app=sentiments-run
+  kubernetes.core.k8s_info:
+    kubeconfig: '{{ KUBECONFIG }}'
+    api_version: v1
+    kind: Pod
+    namespace: '{{ ns }}'
+    label_selectors:
+    - app=sentiments-run
+  register: sentiment_pods
+  tags:
+  - sentiments_reset
+- name: Delete pods with label app=sentiments-run
+  when: sentiment_pods.resources | length > 0
+  loop: '{{ sentiment_pods.resources }}'
+  loop_control:
+    label: '{{ item.metadata.name }}'
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: absent
+    api_version: v1
+    kind: Pod
+    namespace: '{{ ns }}'
+    name: '{{ item.metadata.name }}'
+  tags:
+  - sentiments_reset
+- name: Force-delete any leftover 'sentiments-run-*' pods (fallback)
+  shell: "set -euo pipefail\nPODS=$(kubectl --kubeconfig \"{{ KUBECONFIG }}\" -n \"\
+    {{ ns }}\" get pods -o name | grep -E 'sentiments-run-' || true)\nif [ -n \"$PODS\"\
+    \ ]; then\n  kubectl --kubeconfig \"{{ KUBECONFIG }}\" -n \"{{ ns }}\" delete\
+    \ $PODS --grace-period=0 --force --wait=false\nfi\n"
+  args:
+    executable: /bin/bash
+  changed_when: true
+  tags:
+  - sentiments_reset
+- name: Delete PVC (if exists)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: absent
+    api_version: v1
+    kind: PersistentVolumeClaim
+    namespace: '{{ ns }}'
+    name: '{{ SENTIMENTS_PVC_NAME }}'
+  ignore_errors: true
+  tags:
+  - sentiments_reset
+- name: Delete PV (if exists)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: absent
+    api_version: v1
+    kind: PersistentVolume
+    name: '{{ SENTIMENTS_PV_NAME }}'
+  ignore_errors: true
+  tags:
+  - sentiments_reset
+- name: Create PV (NFS, RWX)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: '{{ SENTIMENTS_PV_NAME }}'
+      spec:
+        capacity:
+          storage: '{{ SENTIMENTS_STORAGE }}'
+        accessModes:
+        - ReadWriteMany
+        persistentVolumeReclaimPolicy: Retain
+        storageClassName: manual
+        nfs:
+          server: '{{ NFS_SERVER_IP }}'
+          path: '{{ SENTIMENTS_NFS_DIR }}'
+        mountOptions:
+        - nfsvers=4.2
+        - rsize=1048576
+        - wsize=1048576
+  tags:
+  - sentiments_create
+- name: Create PVC (bind to PV, RWX)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: '{{ SENTIMENTS_PVC_NAME }}'
+        namespace: '{{ ns }}'
+      spec:
+        accessModes:
+        - ReadWriteMany
+        resources:
+          requests:
+            storage: '{{ SENTIMENTS_STORAGE }}'
+        storageClassName: manual
+        volumeName: '{{ SENTIMENTS_PV_NAME }}'
+  tags:
+  - sentiments_create
+- name: Run sentiments Job (NFS-backed)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: sentiments-run
+        namespace: '{{ ns }}'
+        labels:
+          app: sentiments-run
+      spec:
+        backoffLimit: 1
+        template:
+          metadata:
+            labels:
+              app: sentiments-run
+          spec:
+            restartPolicy: Never
+            securityContext:
+              runAsUser: 1000
+              runAsGroup: 1000
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            containers:
+            - name: runner
+              image: '{{ SENTIMENTS_RUN_IMAGE }}'
+              imagePullPolicy: IfNotPresent
+              env:
+              - name: PYTHONUNBUFFERED
+                value: '1'
+              - name: INFLUX_URL
+                value: '{{ SENTIMENTS_INFLUX_URL }}'
+              - name: INFLUX_TOKEN
+                value: '{{ SENTIMENTS_INFLUX_TOKEN }}'
+              - name: INFLUX_ORG
+                value: '{{ SENTIMENTS_INFLUX_ORG }}'
+              - name: INFLUX_BUCKET
+                value: '{{ SENTIMENTS_INFLUX_BUCKET }}'
+              - name: INFLUX_BUCKET_NEWS
+                value: '{{ SENTIMENTS_INFLUX_BUCKET_NEWS }}'
+              - name: NEWS_MEAS
+                value: '{{ SENTIMENTS_NEWS_MEAS }}'
+              - name: INFLUX_BUCKET_SENT
+                value: '{{ SENTIMENTS_INFLUX_BUCKET_SENT }}'
+              - name: SENT_MEAS
+                value: '{{ SENTIMENTS_SENT_MEAS }}'
+              - name: START_BACKFILL_DAYS
+                value: '{{ SENTIMENTS_START_BACKFILL_DAYS }}'
+              - name: BATCH_LIMIT
+                value: '{{ SENTIMENTS_BATCH_LIMIT }}'
+              - name: POLL_SECONDS
+                value: '{{ SENTIMENTS_POLL_SECONDS }}'
+              - name: FINBERT_URL
+                value: '{{ SENTIMENTS_FINBERT_URL }}'
+              - name: CHECKPOINT_PATH
+                value: '{{ SENTIMENTS_CHECKPOINT_PATH }}'
+              - name: INCLUDE_SUMMARY
+                value: '{{ SENTIMENTS_INCLUDE_SUMMARY }}'
+              - name: DISABLE_CHECKPOINT
+                value: '{{ SENTIMENTS_DISABLE_CHECKPOINT }}'
+              volumeMounts:
+              - name: data
+                mountPath: '{{ SENTIMENTS_NFS_DIR }}'
+              command:
+              - /bin/sh
+              - -lc
+              args:
+              - 'python -m venv /tmp/venv && . /tmp/venv/bin/activate && pip install
+                --no-cache-dir influxdb-client requests python-dateutil && python
+                "{{ SENTIMENTS_NFS_DIR }}/sentiments.py"
+
+                '
+            volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: '{{ SENTIMENTS_PVC_NAME }}'
+  tags:
+  - sentiments_job

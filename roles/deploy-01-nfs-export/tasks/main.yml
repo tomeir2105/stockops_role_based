@@ -1,0 +1,55 @@
+- name: Ensure NFS server packages are installed
+  ansible.builtin.apt:
+    name:
+    - nfs-kernel-server
+    state: present
+    update_cache: true
+- name: Ensure /etc/exports.d exists
+  ansible.builtin.file:
+    path: /etc/exports.d
+    state: directory
+    mode: '0755'
+- name: Ensure NFS base path exists (export root on FS, not exported)
+  ansible.builtin.file:
+    path: '{{ nfs_base_path }}'
+    state: directory
+    mode: '0755'
+- name: Ensure app subdirs exist with correct ownership
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    mode: '{{ app_dir_mode }}'
+    owner: '{{ item.owner }}'
+    group: '{{ item.group }}'
+  loop:
+  - path: '{{ nfs_base_path }}/grafana'
+    owner: '472'
+    group: '472'
+  - path: '{{ nfs_base_path }}/influxdb'
+    owner: '1000'
+    group: '1000'
+- name: Write exports.d file with subdirectory exports (root_squash)
+  ansible.builtin.copy:
+    dest: '{{ exports_d_file }}'
+    mode: '0644'
+    content: '{{ nfs_base_path }}/grafana  {{ nfs_allowed_cidr }}(rw,sync,no_subtree_check,root_squash)
+
+      {{ nfs_base_path }}/influxdb {{ nfs_allowed_cidr }}(rw,sync,no_subtree_check,root_squash)
+
+      '
+- name: Reload NFS exports
+  ansible.builtin.command: exportfs -ra
+  register: exportfs_out
+  changed_when: '''exported'' in exportfs_out.stdout or ''reexported'' in exportfs_out.stdout'
+- name: Restart nfs-kernel-server (ensure service picks up changes)
+  ansible.builtin.service:
+    name: nfs-kernel-server
+    state: restarted
+    enabled: true
+- name: 'Quick sanity: show exports (local)'
+  ansible.builtin.command: exportfs -v
+  register: exports_verbose
+  changed_when: false
+- name: Show exports output
+  ansible.builtin.debug:
+    var: exports_verbose.stdout

@@ -1,0 +1,106 @@
+- name: Ensure config dir (server)
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: '0755'
+- name: Write /etc/rancher/k3s/config.yaml (server kubelet tuning)
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml
+    mode: '0644'
+    content: "node-name: \"{{ inventory_hostname | lower }}\"\nkubelet-arg:\n  - \"\
+      eviction-hard=memory.available<200Mi,nodefs.available<5%,imagefs.available<5%\"\
+      \n  - \"eviction-soft=memory.available<300Mi\"\n  - \"eviction-soft-grace-period=memory.available=2m\"\
+      \n  - \"system-reserved=cpu=100m,memory=256Mi\"\n  - \"kube-reserved=cpu=150m,memory=384Mi\"\
+      \n  - \"image-gc-high-threshold=80\"\n  - \"image-gc-low-threshold=70\"\n"
+- name: Install k3s server (async) if missing
+  ansible.builtin.shell: "set -e\ncurl -sfL https://get.k3s.io | \\\n  K3S_KUBECONFIG_MODE=644\
+    \ \\\n  INSTALL_K3S_EXEC=\"server\" \\\n  sh -\n"
+  args:
+    executable: /bin/bash
+  when: not k3s_unit.stat.exists
+  async: '{{ k3s_async_timeout }}'
+  poll: '{{ k3s_poll_interval }}'
+  register: k3s_server_install
+- name: Ensure k3s server is enabled and started
+  ansible.builtin.systemd:
+    name: k3s
+    state: started
+    enabled: true
+    daemon_reload: true
+- name: Wait until k3s service is active
+  ansible.builtin.command: systemctl is-active --quiet k3s
+  register: k3s_active
+  retries: 600
+  delay: 5
+  changed_when: false
+  until: k3s_active.rc == 0
+- name: Wait for API to listen on 6443
+  ansible.builtin.wait_for:
+    host: '{{ k3s_server_ip }}'
+    port: 6443
+    state: started
+    delay: 2
+    timeout: 600
+- name: Ensure node-token exists on the server
+  ansible.builtin.stat:
+    path: /var/lib/rancher/k3s/server/node-token
+  register: token_stat
+- name: Fail with hint if node-token is missing
+  ansible.builtin.fail:
+    msg: 'Node token not found. Something is wrong with server install. Expected:
+      /var/lib/rancher/k3s/server/node-token
+
+      '
+  when: not token_stat.stat.exists
+- name: Ensure config dir
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: '0755'
+- name: Write join token file on worker
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/node-token
+    mode: '0600'
+    content: '{{ k3s_join_token }}'
+- name: Write /etc/rancher/k3s/config.yaml
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml
+    mode: '0644'
+    content: "server: https://{{ k3s_server_ip }}:6443\nnode-name: \"{{ inventory_hostname\
+      \ | lower }}\"\nkubelet-arg:\n  - \"eviction-hard=memory.available<200Mi,nodefs.available<5%,imagefs.available<5%\"\
+      \n  - \"eviction-soft=memory.available<300Mi\"\n  - \"eviction-soft-grace-period=memory.available=2m\"\
+      \n  - \"system-reserved=cpu=100m,memory=256Mi\"\n  - \"kube-reserved=cpu=150m,memory=384Mi\"\
+      \n  - \"image-gc-high-threshold=80\"\n  - \"image-gc-low-threshold=70\"\n"
+- name: Run k3s agent installer (async)
+  ansible.builtin.shell: "set -e\ncurl -sfL https://get.k3s.io | \\\n  INSTALL_K3S_TYPE=agent\
+    \ \\\n  K3S_URL=https://{{ k3s_server_ip }}:6443 \\\n  K3S_TOKEN_FILE=/etc/rancher/k3s/node-token\
+    \ \\\n  sh -\n"
+  args:
+    executable: /bin/bash
+  async: '{{ k3s_async_timeout }}'
+  poll: '{{ k3s_poll_interval }}'
+  register: k3s_install
+- name: Confirm k3s-agent unit file exists
+  ansible.builtin.stat:
+    path: /etc/systemd/system/k3s-agent.service
+  register: agent_unit_stat
+- name: Fail if k3s-agent unit missing (show installer output)
+  ansible.builtin.fail:
+    msg: 'k3s agent did not install a systemd unit.
+
+      --- installer stdout ---
+
+      {{ k3s_install.stdout | default('''') }}
+
+      --- installer stderr ---
+
+      {{ k3s_install.stderr | default('''') }}
+
+      '
+  when: not agent_unit_stat.stat.exists
+- name: Start and enable k3s-agent
+  ansible.builtin.systemd:
+    name: k3s-agent
+    state: started
+    enabled: true
+    daemon_reload: true

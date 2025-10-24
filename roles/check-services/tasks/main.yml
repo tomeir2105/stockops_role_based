@@ -1,0 +1,45 @@
+- name: Detect kubectl
+  shell: command -v kubectl >/dev/null 2>&1 && echo kubectl || echo 'k3s kubectl'
+  args:
+    executable: /bin/bash
+  register: kubectl_cmd
+  changed_when: false
+- name: Get URLs
+  shell: 'set -e
+
+    k="{{ kubectl_cmd.stdout }}"
+
+    g=$($k -n {{ ns }} get svc grafana -o jsonpath=''{.spec.ports[0].nodePort}'' 2>/dev/null
+    || $k -n {{ ns }} get svc grafana-nodeport -o jsonpath=''{.spec.ports[0].nodePort}''
+    2>/dev/null)
+
+    i=$($k -n {{ ns }} get svc influxdb -o jsonpath=''{.spec.ports[0].nodePort}''
+    2>/dev/null || $k -n {{ ns }} get svc influxdb-nodeport -o jsonpath=''{.spec.ports[0].nodePort}''
+    2>/dev/null)
+
+    j=$($k -n {{ ns }} get svc jenkins-nodeport -o jsonpath=''{.spec.ports[?(@.name=="http")].nodePort}''
+    2>/dev/null || $k -n {{ ns }} get svc jenkins -o jsonpath=''{.spec.ports[0].nodePort}''
+    2>/dev/null)
+
+    f=$($k -n {{ ns }} get svc finbert-svc -o jsonpath=''{.spec.ports[?(@.name=="http")].nodePort}''
+    2>/dev/null || $k -n {{ ns }} get svc jenkins -o jsonpath=''{.spec.ports[0].nodePort}''
+    2>/dev/null)
+
+    echo "Grafana → http://{{ NODE_IP }}:$g"
+
+    echo "InfluxDB → http://{{ NODE_IP }}:$i"
+
+    echo "Jenkins → http://{{ NODE_IP }}:$j"
+
+    echo "Finbert → http://{{ NODE_IP }}:$f"
+
+    '
+  args:
+    executable: /bin/bash
+  register: urls
+  changed_when: false
+  failed_when: false
+- name: Print URLs (one per line)
+  ansible.builtin.debug:
+    msg: '{{ item }}'
+  loop: '{{ urls.stdout_lines }}'

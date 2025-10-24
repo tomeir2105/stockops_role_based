@@ -1,0 +1,83 @@
+- name: Remove any fstab line that mounts {{ NFS_MOUNTPOINT }} from a device/label/uuid
+  lineinfile:
+    path: /etc/fstab
+    state: absent
+    regexp: ^[#\s]*(LABEL=|UUID=|/dev/[^ \t]+)\s+{{ NFS_MOUNTPOINT | regex_escape()
+      }}\b
+  notify: systemd daemon-reload
+- name: Remove any loopback NFS fstab line for {{ NFS_MOUNTPOINT }}
+  lineinfile:
+    path: /etc/fstab
+    state: absent
+    regexp: ^\S+:{{ NFS_MOUNTPOINT | regex_escape() }}\s+{{ NFS_MOUNTPOINT | regex_escape()
+      }}\b
+  notify: systemd daemon-reload
+- name: Disable and stop generated mount unit if present
+  command: systemctl disable --now {{ _mount_unit }}
+  register: _disable_mount_unit
+  failed_when: false
+  changed_when: '''Removed'' in _disable_mount_unit.stdout or ''disabled'' in _disable_mount_unit.stdout'
+- name: If {{ NFS_MOUNTPOINT }} is mounted, unmount it (covers accidental NFS loopback)
+  shell: "set -e\nif mountpoint -q \"{{ NFS_MOUNTPOINT }}\"; then\n  umount -l \"\
+    {{ NFS_MOUNTPOINT }}\"\nfi\n"
+  args:
+    executable: /bin/bash
+  changed_when: false
+- name: Ensure base path exists on local filesystem (not mounted)
+  file:
+    path: '{{ NFS_MOUNTPOINT }}'
+    state: directory
+    owner: '{{ TARGET_USER }}'
+    group: '{{ TARGET_USER }}'
+    mode: '0775'
+- name: Create application subdirectories (recursive, creates parents)
+  file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner | default(TARGET_USER) }}'
+    group: '{{ item.group | default(TARGET_USER) }}'
+    mode: '{{ item.mode | default(''0775'') }}'
+    recurse: true
+  loop: '{{ APP_DIRS | default([]) }}'
+- name: Install NFS packages
+  package:
+    name:
+    - nfs-kernel-server
+    - nfs-common
+    - rpcbind
+    state: present
+- name: Write exports file
+  copy:
+    dest: '{{ NFS_EXPORTS_FILE }}'
+    mode: '0644'
+    content: '# Managed by Ansible — DO NOT EDIT
+
+      {{ NFS_MOUNTPOINT }} {{ NFS_ALLOWED_CIDR }}({{ NFS_EXPORT_OPTS }})
+
+      '
+- name: Reload exports
+  command: exportfs -ra
+- name: Enable/start rpcbind
+  service:
+    name: rpcbind
+    state: started
+    enabled: true
+- name: Enable/start NFS
+  service:
+    name: nfs-kernel-server
+    state: started
+    enabled: true
+- name: VERIFY | export is present
+  command: exportfs -v
+  register: _exports
+  changed_when: false
+- name: VERIFY | assert base export is present
+  assert:
+    that:
+    - NFS_MOUNTPOINT in _exports.stdout
+    success_msg: Export for {{ NFS_MOUNTPOINT }} is present.
+    fail_msg: 'Expected export for {{ NFS_MOUNTPOINT }} not found.
+
+      Got:
+
+      {{ _exports.stdout }}'

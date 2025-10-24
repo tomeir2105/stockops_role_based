@@ -1,0 +1,106 @@
+- name: Validate target_app
+  assert:
+    that:
+    - target_app is defined
+    - target_app in ['grafana','influxdb']
+    fail_msg: Provide -e target_app=grafana|influxdb
+- name: Pick PVC/PV names from APP_PVCS
+  set_fact:
+    _pvc_item: '{{ (APP_PVCS | selectattr(''name'',''equalto'', target_app ~ ''-pvc'')
+      | list | first) }}'
+  failed_when: _pvc_item is not defined
+- name: Derive NFS dir entry from APP_DIRS
+  set_fact:
+    _dir_item: '{{ (APP_DIRS | selectattr(''path'',''search'',''/'' ~ target_app ~
+      ''$'') | list | first) }}'
+  failed_when: _dir_item is not defined
+- name: Compose app facts
+  set_fact:
+    app_ns: '{{ ns }}'
+    app_name: '{{ target_app }}'
+    deploy_name: '{{ target_app }}'
+    svc_name: '{{ target_app }}'
+    pvc_name: '{{ _pvc_item.name }}'
+    pv_name: '{{ _pvc_item.pv }}'
+    nfs_path: '{{ _dir_item.path }}'
+    nfs_owner: '{{ _dir_item.owner }}'
+    nfs_group: '{{ _dir_item.group }}'
+    nfs_mode: '{{ _dir_item.mode }}'
+    access_modes: '{{ access_modes_map[target_app] }}'
+    storage_size: '{{ GRAFANA_STORAGE if target_app==''grafana'' else INFLUXDB_STORAGE
+      }}'
+- name: Show plan
+  debug:
+    msg:
+    - 'App: {{ app_name }}  NS: {{ app_ns }}'
+    - 'PVC/PV: {{ pvc_name }} / {{ pv_name }}'
+    - 'NFS: {{ nfs_server_ip }}:{{ nfs_path }}  owner:{{nfs_owner}} group:{{nfs_group}}
+      mode:{{nfs_mode}}'
+    - 'Size: {{ storage_size }}  AccessModes: {{ access_modes | join('','') }}'
+- name: Delete Deployment (ignore if missing)
+  shell: kubectl -n {{ hostvars['localhost'].app_ns }} delete deploy {{ hostvars['localhost'].deploy_name
+    }} --wait=false 2>/dev/null || true
+  args:
+    executable: /bin/bash
+- name: Delete Service (ignore if missing)
+  shell: kubectl -n {{ hostvars['localhost'].app_ns }} delete svc {{ hostvars['localhost'].svc_name
+    }} --wait=false 2>/dev/null || true
+  args:
+    executable: /bin/bash
+- name: Delete PVC (ignore if missing)
+  shell: kubectl -n {{ hostvars['localhost'].app_ns }} delete pvc {{ hostvars['localhost'].pvc_name
+    }} --wait=false 2>/dev/null || true
+  args:
+    executable: /bin/bash
+- name: Delete PV (ignore if missing)
+  shell: kubectl delete pv {{ hostvars['localhost'].pv_name }} --wait=false 2>/dev/null
+    || true
+  args:
+    executable: /bin/bash
+- name: Ensure base directory exists with desired ownership/permissions from vars.yml
+  file:
+    path: '{{ hostvars[''localhost''].nfs_path }}'
+    state: directory
+    owner: '{{ hostvars[''localhost''].nfs_owner }}'
+    group: '{{ hostvars[''localhost''].nfs_group }}'
+    mode: '{{ hostvars[''localhost''].nfs_mode }}'
+- name: List immediate children
+  find:
+    paths: '{{ hostvars[''localhost''].nfs_path }}'
+    file_type: any
+    depth: 1
+  register: _nfs_children
+- name: Remove everything inside (preserve parent)
+  file:
+    path: '{{ item.path }}'
+    state: absent
+  loop: '{{ _nfs_children.files }}'
+  when: item.path != hostvars['localhost'].nfs_path
+- name: Create static NFS PersistentVolume
+  shell: "cat <<'YAML' | kubectl apply -f -\napiVersion: v1\nkind: PersistentVolume\n\
+    metadata:\n  name: {{ hostvars['localhost'].pv_name }}\nspec:\n  capacity:\n \
+    \   storage: {{ hostvars['localhost'].storage_size }}\n  accessModes: {{ hostvars['localhost'].access_modes\
+    \ | to_nice_json }}\n  persistentVolumeReclaimPolicy: Retain\n  nfs:\n    server:\
+    \ {{ hostvars['localhost'].nfs_server_ip }}\n    path: {{ hostvars['localhost'].nfs_path\
+    \ }}\nYAML\n"
+  args:
+    executable: /bin/bash
+- name: Create PersistentVolumeClaim bound to PV
+  shell: "cat <<'YAML' | kubectl apply -f -\napiVersion: v1\nkind: PersistentVolumeClaim\n\
+    metadata:\n  name: {{ hostvars['localhost'].pvc_name }}\n  namespace: {{ hostvars['localhost'].app_ns\
+    \ }}\nspec:\n  accessModes: {{ hostvars['localhost'].access_modes | to_nice_json\
+    \ }}\n  resources:\n    requests:\n      storage: {{ hostvars['localhost'].storage_size\
+    \ }}\n  volumeName: {{ hostvars['localhost'].pv_name }}\nYAML\n"
+  args:
+    executable: /bin/bash
+- name: Wait until PVC is Bound
+  shell: "for i in {1..30}; do\n  phase=\"$(kubectl -n {{ hostvars['localhost'].app_ns\
+    \ }} get pvc {{ hostvars['localhost'].pvc_name }} -o jsonpath='{.status.phase}'\
+    \ 2>/dev/null || true)\"\n  [ \"$phase\" = \"Bound\" ] && exit 0\n  sleep 2\n\
+    done\necho \"PVC not Bound in time\"; exit 1\n"
+  args:
+    executable: /bin/bash
+- name: Run stage4_db deploy
+  command: 'ansible-playbook -i {{ playbook_dir }}/inventory.ini {{ playbook_dir }}/stage4_db/deploy-03-stockops.yml
+
+    '

@@ -1,0 +1,12 @@
+nfs_server_ip: '{{ NFS_SERVER_IP }}'
+export_root: '{{ NFS_MOUNTPOINT }}'
+_graf_path: '{{ NFS_MOUNTPOINT }}/grafana'
+_infl_path: '{{ NFS_MOUNTPOINT }}/influxdb'
+grafana_uid: '{{ (APP_DIRS | selectattr(''path'',''equalto'', _graf_path) | map(attribute=''owner'')
+  | first) | default(''472'') }}'
+grafana_gid: '{{ (APP_DIRS | selectattr(''path'',''equalto'', _graf_path) | map(attribute=''group'')
+  | first) | default(''472'') }}'
+influx_uid: '{{ (APP_DIRS | selectattr(''path'',''equalto'', _infl_path) | map(attribute=''owner'')
+  | first) | default(''1000'') }}'
+influx_gid: '{{ (APP_DIRS | selectattr(''path'',''equalto'', _infl_path) | map(attribute=''group'')
+  | first) | default(''1000'') }}'

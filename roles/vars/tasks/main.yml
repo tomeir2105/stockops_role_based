@@ -1,0 +1,3 @@
+- name: Placeholder for vars.yml — no tasks extracted
+  debug:
+    msg: Convert vars.yml into proper role tasks.

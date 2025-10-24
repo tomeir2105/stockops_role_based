@@ -1,0 +1,6 @@
+BASE_URL: '{{ GRAFANA_URL | regex_replace(''/+$'','''') }}'
+GRAFANA_DS_NAME: influxdb-flux
+GRAFANA_DASHBOARDS_DIR: '{{ playbook_dir }}/../apps/grafana'
+_headers:
+  Authorization: Bearer {{ GRAFANA_TOKEN }}
+  Content-Type: application/json

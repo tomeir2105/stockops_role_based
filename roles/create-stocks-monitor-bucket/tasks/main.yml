@@ -1,0 +1,147 @@
+- name: Assert required variables exist
+  ansible.builtin.assert:
+    that:
+    - INFLUXDB_URL is defined and INFLUXDB_URL | length > 0
+    - INFLUXDB_ADMIN_TOKEN is defined and INFLUXDB_ADMIN_TOKEN | length > 0
+    - MONITOR_ORG is defined and MONITOR_ORG | length > 0
+    - STOCKSMON_BUCKET is defined and STOCKSMON_BUCKET | length > 0
+    fail_msg: 'Missing one of: INFLUXDB_URL, INFLUXDB_ADMIN_TOKEN, MONITOR_ORG, STOCKSMON_BUCKET'
+- name: Show effective settings
+  ansible.builtin.debug:
+    msg:
+      influx_url: '{{ INFLUXDB_URL }}'
+      org_name: '{{ MONITOR_ORG }}'
+      bucket_name: '{{ STOCKSMON_BUCKET }}'
+      retention_seconds: '{{ retention_seconds }}'
+- name: Check /health
+  ansible.builtin.uri:
+    url: '{{ INFLUXDB_URL }}/health'
+    method: GET
+    return_content: true
+    status_code: 200
+    timeout: 10
+  register: health
+- name: Lookup org by name
+  ansible.builtin.uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/orgs?org={{ MONITOR_ORG | urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Accept: application/json
+    return_content: true
+    status_code: 200
+  register: org_lookup
+- name: Extract org_id
+  ansible.builtin.set_fact:
+    org_id: '{{ (org_lookup.json.orgs | selectattr(''name'',''equalto'', MONITOR_ORG)
+      | list | first).id | default('''') }}'
+- name: Fail if org not found
+  ansible.builtin.assert:
+    that:
+    - org_id | length > 0
+    fail_msg: Org '{{ MONITOR_ORG }}' not found or token lacks access.
+- name: Lookup bucket by name
+  ansible.builtin.uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets?orgID={{ org_id }}&name={{ STOCKSMON_BUCKET
+      | urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Accept: application/json
+    return_content: true
+    status_code:
+    - 200
+    - 404
+  register: bucket_lookup
+- name: Determine existence and current retention
+  ansible.builtin.set_fact:
+    bucket_exists: '{{ (bucket_lookup.status | int == 200) and ((bucket_lookup.json.buckets
+      | default([])) | length > 0) }}'
+    bucket_id: '{{ (bucket_lookup.json.buckets | default([]) | map(attribute=''id'')
+      | list | first) | default('''') }}'
+    _bucket0: '{{ (bucket_lookup.json.buckets | default([]) | first) | default({})
+      }}'
+    current_retention: "{{\n  (\n    (_bucket0.retentionRules | default([]) | first\
+      \ | default({})).everySeconds\n    | default(0)\n  ) | int\n}}"
+- name: Create bucket if missing (3-day retention)
+  ansible.builtin.uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets'
+    method: POST
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Content-Type: application/json
+      Accept: application/json
+    body_format: json
+    body:
+      name: '{{ STOCKSMON_BUCKET }}'
+      orgID: '{{ org_id }}'
+      retentionRules:
+      - type: expire
+        everySeconds: '{{ retention_seconds }}'
+    status_code:
+    - 201
+    - 409
+    - 401
+    - 403
+  register: create_attempt
+  when: not bucket_exists
+  changed_when: create_attempt.status | int == 201
+- name: Fail if unauthorized create
+  ansible.builtin.fail:
+    msg: 'Failed to create bucket ''{{ STOCKSMON_BUCKET }}'' in org ''{{ MONITOR_ORG
+      }}'': HTTP {{ create_attempt.status }} (token lacks permissions).'
+  when:
+  - not bucket_exists
+  - create_attempt.status is defined
+  - create_attempt.status | int in [401, 403]
+- name: Re-fetch bucket (after create or if existed)
+  ansible.builtin.uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets?orgID={{ org_id }}&name={{ STOCKSMON_BUCKET
+      | urlencode }}'
+    method: GET
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Accept: application/json
+    return_content: true
+    status_code: 200
+  register: bucket_final
+- name: Extract final retention
+  ansible.builtin.set_fact:
+    bucket_id: '{{ (bucket_final.json.buckets | default([]) | map(attribute=''id'')
+      | list | first) | default('''') }}'
+    final_retention: "{{\n  (\n    ((bucket_final.json.buckets | default([]) | first)\
+      \ | default({})).retentionRules\n    | default([]) | first | default({})\n \
+      \ ).everySeconds | default(0) | int\n}}"
+- name: Update retention if different
+  ansible.builtin.uri:
+    url: '{{ INFLUXDB_URL }}/api/v2/buckets/{{ bucket_id }}'
+    method: PATCH
+    headers:
+      Authorization: Token {{ INFLUXDB_ADMIN_TOKEN }}
+      Content-Type: application/json
+      Accept: application/json
+    body_format: json
+    body:
+      retentionRules:
+      - type: expire
+        everySeconds: '{{ retention_seconds }}'
+    status_code:
+    - 200
+    - 401
+    - 403
+  register: patch_attempt
+  when:
+  - (final_retention | int) != (retention_seconds | int)
+  changed_when: patch_attempt.status | int == 200
+- name: Fail if unauthorized patch
+  ansible.builtin.fail:
+    msg: 'Failed to update retention on bucket ''{{ STOCKSMON_BUCKET }}'' in org ''{{
+      MONITOR_ORG }}'': HTTP {{ patch_attempt.status }} (token lacks permissions).'
+  when:
+  - (final_retention | int) != (retention_seconds | int)
+  - patch_attempt.status is defined
+  - patch_attempt.status | int in [401, 403]
+- name: Success summary
+  ansible.builtin.debug:
+    msg: Bucket '{{ STOCKSMON_BUCKET }}' in org '{{ MONITOR_ORG }}' ensured with retention={{
+      retention_seconds }}s at {{ INFLUXDB_URL }}.

@@ -1,0 +1,6 @@
+NAMESPACE: '{{ lookup(''vars'', ''K8S_NAMESPACE'') | default(''stockops'') }}'
+PV_PVC_MAP:
+- pv: grafana-pv
+  pvc: grafana-pvc
+- pv: influxdb-pv
+  pvc: influxdb-pvc

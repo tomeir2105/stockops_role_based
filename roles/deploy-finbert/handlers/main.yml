@@ -1,0 +1,12 @@
+- name: restart k3s server
+  listen: restart k3s
+  ansible.builtin.service:
+    name: k3s
+    state: restarted
+  when: '''k3s_server'' in group_names'
+- name: restart k3s agent
+  listen: restart k3s
+  ansible.builtin.service:
+    name: k3s-agent
+    state: restarted
+  when: '''k3s_workers'' in group_names'

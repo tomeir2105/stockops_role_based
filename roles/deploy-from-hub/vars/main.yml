@@ -1,0 +1,7 @@
+ns: '{{ NAMESPACE }}'
+nfs_server_ip: '{{ NFS_SERVER_IP }}'
+nfs_base: '{{ NFS_MOUNTPOINT }}'
+jenkins_image: '{{ JENKINS_IMAGE_REPO }}:{{ JENKINS_TAG }}'
+grafana_image: '{{ GRAFANA_IMAGE_REPO }}:{{ GRAFANA_TAG }}'
+influxdb_image: '{{ INFLUXDB_IMAGE_REPO }}:{{ INFLUXDB_TAG }}'
+ansible_venv_path: /opt/ansible-venv

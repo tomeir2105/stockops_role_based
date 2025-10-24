@@ -1,0 +1,137 @@
+- name: Ensure openssh-client (ssh-keyscan) is installed on controller
+  become: true
+  package:
+    name: openssh-client
+    state: present
+- name: Ensure controller .ssh directory exists
+  file:
+    path: '{{ CONTROLLER_SSH_DIR }}'
+    state: directory
+    mode: '0700'
+- name: Ensure known_hosts file exists with strict perms
+  file:
+    path: '{{ CONTROLLER_KNOWN_HOSTS_PATH }}'
+    state: touch
+    mode: '0600'
+- name: Create ed25519 keypair if missing
+  community.crypto.openssh_keypair:
+    path: '{{ CONTROLLER_KEY_PATH }}'
+    type: ed25519
+    state: present
+    mode: '0600'
+- name: Build list of hosts to scan
+  set_fact:
+    _ssh_scan_hosts: '{{ groups[''ssh_scan_hosts''] | default([]) }}'
+- name: ssh-keyscan for all supported types (hashed hostnames)
+  command: ssh-keyscan -T 5 -H -t ed25519,ecdsa,rsa {{ item }}
+  register: _scan_results
+  changed_when: false
+  failed_when: false
+  loop: '{{ _ssh_scan_hosts }}'
+  loop_control:
+    label: '{{ item }}'
+- name: Add scanned host keys to known_hosts (idempotent)
+  when: (item.stdout | default('') | trim) != ''
+  known_hosts:
+    path: '{{ CONTROLLER_KNOWN_HOSTS_PATH }}'
+    name: '{{ item.item }}'
+    key: '{{ item.stdout }}'
+    state: present
+  loop: '{{ _scan_results.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+- name: Report hosts with no discoverable host key
+  when: (item.stdout | default('') | trim) == ''
+  debug:
+    msg: Skipped adding known_hosts for {{ item.item }} (no key found via ssh-keyscan).
+  loop: '{{ _scan_results.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+- name: Authorize controller public key (idempotent, no duplicates)
+  ansible.posix.authorized_key:
+    user: '{{ TARGET_USER }}'
+    key: '{{ _pubkey.content | b64decode }}'
+    state: present
+    manage_dir: true
+- name: Write managed /etc/hosts block exactly once
+  blockinfile:
+    path: /etc/hosts
+    create: true
+    marker: '# {mark} ANSIBLE MANAGED BLOCK (k3s cluster hosts)'
+    block: '{% for h in _all_nodes %}
+
+      {{ hostvars[h].ansible_host }} {{ h }}
+
+      {% endfor %}
+
+      '
+- name: Remove any fstab entry that mounts /mnt/k3s_storage from a device/label/uuid
+  lineinfile:
+    path: /etc/fstab
+    state: absent
+    regexp: ^[#\s]*(LABEL=|UUID=|/dev/[^ \t]+)\s+/mnt/k3s_storage\b
+  notify: Reload systemd
+- name: Stop/disable generated mount unit if present
+  command: systemctl disable --now mnt-k3s_storage.mount
+  register: _mnt_disable
+  failed_when: false
+  changed_when: '''Removed'' in _mnt_disable.stdout or ''disabled'' in _mnt_disable.stdout'
+- name: Install NFS packages
+  package:
+    name:
+    - nfs-kernel-server
+    - nfs-common
+    - rpcbind
+    state: present
+- name: Ensure base path exists (folder we will export)
+  file:
+    path: '{{ NFS_MOUNTPOINT }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0775'
+- name: Create app directories
+  file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner }}'
+    group: '{{ item.group }}'
+    mode: '{{ item.mode }}'
+  loop: '{{ APP_DIRS | default([]) }}'
+- name: Write a single authoritative exports.d file
+  copy:
+    dest: '{{ NFS_EXPORTS_FILE }}'
+    mode: '0644'
+    content: '# Managed by Ansible — DO NOT EDIT
+
+      {{ NFS_MOUNTPOINT }} {{ NFS_ALLOWED_CIDR }}({{ NFS_EXPORT_OPTS }})
+
+      '
+- name: Reload exports
+  command: exportfs -ra
+- name: Enable/start rpcbind
+  service:
+    name: rpcbind
+    state: started
+    enabled: true
+- name: Enable/start NFS
+  service:
+    name: nfs-kernel-server
+    state: started
+    enabled: true
+- name: VERIFY | base export exists
+  command: exportfs -v
+  register: _exports
+  changed_when: false
+- name: VERIFY | assert base export is present
+  assert:
+    that:
+    - NFS_MOUNTPOINT in _exports.stdout
+    - (NFS_ALLOWED_CIDR.split('/'))[0] in _exports.stdout
+    fail_msg: 'Expected export for {{ NFS_MOUNTPOINT }} not found.
+
+      Got:
+
+      {{ _exports.stdout }}
+
+      '

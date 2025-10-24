@@ -1,0 +1,101 @@
+- name: Check if Netdata already present
+  ansible.builtin.stat:
+    path: /usr/sbin/netdata
+  register: netdata_bin
+- name: Try installing from distro (may not exist on this release)
+  ansible.builtin.apt:
+    name: netdata
+    state: present
+  register: apt_netdata
+  failed_when: false
+  when: not netdata_bin.stat.exists
+- name: Re-check Netdata binary after apt
+  ansible.builtin.stat:
+    path: /usr/sbin/netdata
+  register: netdata_bin_after
+- name: Install via Netdata kickstart (fallback)
+  ansible.builtin.shell: "set -euo pipefail\ncurl -fsSL https://my-netdata.io/kickstart.sh\
+    \ | bash -s -- \\\n  --stable-channel \\\n  --disable-telemetry \\\n  --non-interactive\n"
+  args:
+    executable: /bin/bash
+  when: not netdata_bin_after.stat.exists
+- name: Final check — ensure Netdata installed
+  ansible.builtin.stat:
+    path: /usr/sbin/netdata
+  register: netdata_bin_final
+- name: Fail if Netdata still missing
+  ansible.builtin.fail:
+    msg: Netdata was not installed via apt nor kickstart.
+  when: not netdata_bin_final.stat.exists
+- name: Set bind via netdata CLI
+  ansible.builtin.command: netdata -W set-config web "bind to" "{{ netdata_bind }}"
+  register: set_bind
+  changed_when: '''wrote'' in (set_bind.stdout | default('''')) or ''created'' in
+    (set_bind.stdout | default(''''))'
+  failed_when: false
+- name: Set port via netdata CLI
+  ansible.builtin.command: netdata -W set-config web "default port" "{{ netdata_port
+    }}"
+  register: set_port
+  changed_when: '''wrote'' in (set_port.stdout | default('''')) or ''created'' in
+    (set_port.stdout | default(''''))'
+  failed_when: false
+- name: Ensure /etc/netdata/netdata.conf has our web section
+  ansible.builtin.blockinfile:
+    path: '{{ netdata_conf_main }}'
+    create: true
+    mode: '0644'
+    block: "[web]\n    bind to = {{ netdata_bind }}\n    default port = {{ netdata_port\
+      \ }}\n"
+  notify: restart netdata
+- name: Ensure Netdata is enabled and running
+  ansible.builtin.systemd:
+    name: netdata
+    state: started
+    enabled: true
+    daemon_reload: true
+- name: Restart Netdata if CLI changed something
+  ansible.builtin.systemd:
+    name: netdata
+    state: restarted
+  when: set_bind is changed or set_port is changed
+- name: Get effective 'bind to' from netdata
+  ansible.builtin.command: netdata -W get-config web "bind to"
+  register: bind_effective
+  changed_when: false
+  failed_when: false
+- name: Assert 'bind to' is not loopback
+  ansible.builtin.assert:
+    that:
+    - bind_effective.stdout is defined
+    - '''127.0.0.1'' not in bind_effective.stdout'
+- name: List listeners on {{ netdata_port }}
+  ansible.builtin.shell: 'ss -H -ltn "sport = :{{ netdata_port }}" | awk ''{print
+    $4}'' | sort -u
+
+    '
+  register: ss_listeners
+  changed_when: false
+- name: Remediate if only loopback
+  when: "ss_listeners.stdout_lines | length > 0 and (\n  ss_listeners.stdout_lines\n\
+    \  | select('match', '^127\\\\.0\\\\.0\\\\.1:' ~ netdata_port ~ '$')\n  | list\
+    \ | length\n) == (ss_listeners.stdout_lines | length)\n"
+  block:
+  - name: Restart netdata (remedial)
+    ansible.builtin.systemd:
+      name: netdata
+      state: restarted
+  - name: Re-check listeners after restart
+    ansible.builtin.shell: 'ss -H -ltn "sport = :{{ netdata_port }}" | awk ''{print
+      $4}'' | sort -u
+
+      '
+    register: ss_listeners_after
+    changed_when: false
+  - name: Fail if still only loopback after remedial restart
+    when: "ss_listeners_after.stdout_lines | length > 0 and (\n  ss_listeners_after.stdout_lines\n\
+      \  | select('match', '^127\\\\.0\\\\.0\\\\.1:' ~ netdata_port ~ '$')\n  | list\
+      \ | length\n) == (ss_listeners_after.stdout_lines | length)\n"
+    ansible.builtin.fail:
+      msg: 'Netdata is still only listening on 127.0.0.1:{{ netdata_port }} (listeners:
+        {{ ss_listeners_after.stdout_lines | join('', '') }})'

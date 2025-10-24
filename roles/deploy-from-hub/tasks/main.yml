@@ -1,0 +1,237 @@
+- name: Ensure namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: '{{ ns }}'
+- name: Ensure dockerhub-creds is absent
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: dockerhub-creds
+        namespace: '{{ ns }}'
+- name: Create NFS PVs (Jenkins/Grafana/InfluxDB)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition: "apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: jenkins-pv\n\
+      \  labels: { app: jenkins }\nspec:\n  capacity: { storage: \"{{ JENKINS_STORAGE\
+      \ }}\" }\n  accessModes: [ \"ReadWriteMany\" ]\n  persistentVolumeReclaimPolicy:\
+      \ Retain\n  nfs:\n    server: \"{{ nfs_server_ip }}\"\n    path: \"{{ nfs_base\
+      \ }}/jenkins\"\n---\napiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name:\
+      \ grafana-pv\n  labels: { app: grafana }\nspec:\n  capacity: { storage: \"{{\
+      \ GRAFANA_STORAGE }}\" }\n  accessModes: [ \"ReadWriteMany\" ]\n  persistentVolumeReclaimPolicy:\
+      \ Retain\n  nfs:\n    server: \"{{ nfs_server_ip }}\"\n    path: \"{{ nfs_base\
+      \ }}/grafana\"\n---\napiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name:\
+      \ influxdb-pv\n  labels: { app: influxdb }\nspec:\n  capacity: { storage: \"\
+      {{ INFLUXDB_STORAGE }}\" }\n  accessModes: [ \"ReadWriteMany\" ]\n  persistentVolumeReclaimPolicy:\
+      \ Retain\n  nfs:\n    server: \"{{ nfs_server_ip }}\"\n    path: \"{{ nfs_base\
+      \ }}/influxdb\"\n"
+- name: Create PVCs bound to PVs (no StorageClass)
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition: "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: jenkins-home\n\
+      \  namespace: \"{{ ns }}\"\nspec:\n  accessModes: [ \"ReadWriteMany\" ]\n  resources:\
+      \ { requests: { storage: \"{{ JENKINS_STORAGE }}\" } }\n  volumeName: jenkins-pv\n\
+      \  storageClassName: \"\"\n---\napiVersion: v1\nkind: PersistentVolumeClaim\n\
+      metadata:\n  name: grafana-storage\n  namespace: \"{{ ns }}\"\nspec:\n  accessModes:\
+      \ [ \"ReadWriteMany\" ]\n  resources: { requests: { storage: \"{{ GRAFANA_STORAGE\
+      \ }}\" } }\n  volumeName: grafana-pv\n  storageClassName: \"\"\n---\napiVersion:\
+      \ v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: influxdb-data\n  namespace:\
+      \ \"{{ ns }}\"\nspec:\n  accessModes: [ \"ReadWriteMany\" ]\n  resources: {\
+      \ requests: { storage: \"{{ INFLUXDB_STORAGE }}\" } }\n  volumeName: influxdb-pv\n\
+      \  storageClassName: \"\"\n"
+- name: Deploy Jenkins
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: jenkins
+        namespace: '{{ ns }}'
+        labels:
+          app: jenkins
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: jenkins
+        template:
+          metadata:
+            labels:
+              app: jenkins
+          spec:
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            containers:
+            - name: jenkins
+              image: '{{ jenkins_image }}'
+              imagePullPolicy: IfNotPresent
+              ports:
+              - containerPort: '{{ JENKINS_API_PORT }}'
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+              volumeMounts:
+              - name: jenkins-home
+                mountPath: /var/jenkins_home
+            volumes:
+            - name: jenkins-home
+              persistentVolumeClaim:
+                claimName: jenkins-home
+- name: Service Jenkins
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: jenkins
+        namespace: '{{ ns }}'
+        labels:
+          app: jenkins
+      spec:
+        type: NodePort
+        selector:
+          app: jenkins
+        ports:
+        - name: http
+          port: '{{ JENKINS_API_PORT }}'
+          targetPort: '{{ JENKINS_API_PORT }}'
+          nodePort: '{{ JENKINS_NODEPORT }}'
+- name: Deploy Grafana
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+        namespace: '{{ ns }}'
+        labels:
+          app: grafana
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: grafana
+        template:
+          metadata:
+            labels:
+              app: grafana
+          spec:
+            securityContext:
+              fsGroup: 472
+              fsGroupChangePolicy: OnRootMismatch
+            containers:
+            - name: grafana
+              image: '{{ grafana_image }}'
+              imagePullPolicy: IfNotPresent
+              ports:
+              - containerPort: '{{ GRAFANA_API_PORT }}'
+              securityContext:
+                runAsUser: 472
+                runAsGroup: 0
+              volumeMounts:
+              - name: grafana-storage
+                mountPath: /var/lib/grafana
+            volumes:
+            - name: grafana-storage
+              persistentVolumeClaim:
+                claimName: grafana-storage
+- name: Service Grafana
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: grafana
+        namespace: '{{ ns }}'
+        labels:
+          app: grafana
+      spec:
+        type: NodePort
+        selector:
+          app: grafana
+        ports:
+        - name: http
+          port: '{{ GRAFANA_API_PORT }}'
+          targetPort: '{{ GRAFANA_API_PORT }}'
+          nodePort: '{{ GRAFANA_NODEPORT }}'
+- name: Deploy InfluxDB
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: influxdb
+        namespace: '{{ ns }}'
+        labels:
+          app: influxdb
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: influxdb
+        template:
+          metadata:
+            labels:
+              app: influxdb
+          spec:
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            containers:
+            - name: influxdb
+              image: '{{ influxdb_image }}'
+              imagePullPolicy: IfNotPresent
+              ports:
+              - containerPort: '{{ INFLUX_API_PORT }}'
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+              volumeMounts:
+              - name: influxdb-data
+                mountPath: /var/lib/influxdb2
+            volumes:
+            - name: influxdb-data
+              persistentVolumeClaim:
+                claimName: influxdb-data
+- name: Service InfluxDB
+  kubernetes.core.k8s:
+    kubeconfig: '{{ KUBECONFIG }}'
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: influxdb
+        namespace: '{{ ns }}'
+        labels:
+          app: influxdb
+      spec:
+        type: NodePort
+        selector:
+          app: influxdb
+        ports:
+        - name: api
+          port: '{{ INFLUX_API_PORT }}'
+          targetPort: '{{ INFLUX_API_PORT }}'
+          nodePort: '{{ INFLUX_NODEPORT }}'

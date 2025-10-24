@@ -1,0 +1,104 @@
+- name: Ensure Jenkins data dir exists (from APP_DIRS entry)
+  ansible.builtin.file:
+    path: '{{ jenkins_dir.path }}'
+    state: directory
+    owner: '{{ jenkins_dir.owner }}'
+    group: '{{ jenkins_dir.group }}'
+    mode: '{{ jenkins_dir.mode }}'
+    recurse: true
+- name: Ensure Jenkins NFS directory has correct owner/group/mode (from vars.yml)
+  ansible.builtin.file:
+    path: '{{ jenkins_dir.path }}'
+    state: directory
+    owner: '{{ jenkins_dir.owner | int }}'
+    group: '{{ jenkins_dir.group | int }}'
+    mode: '{{ jenkins_dir.mode }}'
+    recurse: true
+- name: Create work directory
+  ansible.builtin.file:
+    path: '{{ workdir }}'
+    state: directory
+    mode: '0755'
+- name: Ensure namespace exists
+  ansible.builtin.shell: 'kubectl get ns {{ NAMESPACE }} >/dev/null 2>&1 || kubectl
+    create ns {{ NAMESPACE }}
+
+    '
+  args:
+    executable: /bin/bash
+- name: Render Jenkins manifests
+  ansible.builtin.copy:
+    dest: '{{ workdir }}/jenkins.yaml'
+    mode: '0644'
+    content: "---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: {{ NAMESPACE\
+      \ }}\n\n---\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: {{ jenkins_sa\
+      \ }}\n  namespace: {{ NAMESPACE }}\n\n---\napiVersion: rbac.authorization.k8s.io/v1\n\
+      kind: Role\nmetadata:\n  name: jenkins-read-secrets\n  namespace: {{ NAMESPACE\
+      \ }}\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"secrets\"]\n    verbs:\
+      \ [\"get\",\"list\",\"watch\"]\n\n---\napiVersion: rbac.authorization.k8s.io/v1\n\
+      kind: RoleBinding\nmetadata:\n  name: jenkins-read-secrets\n  namespace: {{\
+      \ NAMESPACE }}\nsubjects:\n  - kind: ServiceAccount\n    name: {{ jenkins_sa\
+      \ }}\n    namespace: {{ NAMESPACE }}\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n\
+      \  kind: Role\n  name: jenkins-read-secrets\n\n---\napiVersion: v1\nkind: PersistentVolume\n\
+      metadata:\n  name: jenkins-pv\nspec:\n  capacity:\n    storage: {{ JENKINS_STORAGE\
+      \ }}\n  accessModes: [\"ReadWriteMany\"]\n  persistentVolumeReclaimPolicy: Retain\n\
+      \  nfs:\n    server: {{ NFS_SERVER_IP }}\n    path: \"{{ NFS_MOUNTPOINT }}/jenkins\"\
+      \n\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: jenkins-pvc\n\
+      \  namespace: {{ NAMESPACE }}\nspec:\n  accessModes: [\"ReadWriteMany\"]\n \
+      \ resources:\n    requests:\n      storage: {{ JENKINS_STORAGE }}\n  volumeName:\
+      \ jenkins-pv\n  storageClassName: \"\"\n\n---\napiVersion: apps/v1\nkind: Deployment\n\
+      metadata:\n  name: jenkins\n  namespace: {{ NAMESPACE }}\n  labels:\n    app:\
+      \ jenkins\nspec:\n  strategy:\n    type: Recreate\n  replicas: {{ JENKINS_REPLICAS\
+      \ }}\n  selector:\n    matchLabels:\n      app: jenkins\n  template:\n    metadata:\n\
+      \      labels:\n        app: jenkins\n    spec:\n      serviceAccountName: {{\
+      \ jenkins_sa }}\n      securityContext:\n        # Use numeric group from APP_DIRS\
+      \ as fsGroup\n        fsGroup: {{ jenkins_dir.group | int }}\n      containers:\n\
+      \        - name: jenkins\n          image: \"{{ JENKINS_IMAGE_REPO }}:{{ JENKINS_TAG\
+      \ }}\"\n          ports:\n            - containerPort: {{ JENKINS_API_PORT }}\n\
+      \          securityContext:\n            runAsUser: {{ jenkins_dir.owner | int\
+      \ }}\n            runAsGroup: {{ jenkins_dir.group | int }}\n          env:\n\
+      \            - name: JAVA_OPTS\n              value: \"-Djenkins.install.runSetupWizard=false\"\
+      \n          resources:\n            requests:\n              cpu: \"{{ JENKINS_CPU_REQUEST\
+      \ }}\"\n              memory: \"{{ JENKINS_MEM_REQUEST }}\"\n            limits:\n\
+      \              cpu: \"{{ JENKINS_CPU_LIMIT }}\"\n              memory: \"{{\
+      \ JENKINS_MEM_LIMIT }}\"\n          volumeMounts:\n            - name: jenkins-home\n\
+      \              mountPath: /var/jenkins_home\n          readinessProbe:\n   \
+      \         httpGet:\n              path: /login\n              port: {{ JENKINS_API_PORT\
+      \ }}\n            initialDelaySeconds: 30\n            periodSeconds: 10\n \
+      \     volumes:\n        - name: jenkins-home\n          persistentVolumeClaim:\n\
+      \            claimName: jenkins-pvc\n\n---\napiVersion: v1\nkind: Service\n\
+      metadata:\n  name: jenkins\n  namespace: {{ NAMESPACE }}\nspec:\n  selector:\n\
+      \    app: jenkins\n  type: NodePort\n  ports:\n    - name: http\n      port:\
+      \ {{ JENKINS_API_PORT }}\n      targetPort: {{ JENKINS_API_PORT }}\n      nodePort:\
+      \ {{ JENKINS_NODEPORT }}\n"
+- name: Apply Jenkins manifests
+  ansible.builtin.shell: kubectl apply -f {{ workdir }}/jenkins.yaml
+  args:
+    executable: /bin/bash
+- name: Wait for Jenkins rollout
+  ansible.builtin.shell: kubectl -n {{ NAMESPACE }} rollout status deploy/jenkins
+    --timeout=10m
+  args:
+    executable: /bin/bash
+- name: Set Jenkins admin password from vars.yml
+  ansible.builtin.shell: "POD=$(kubectl -n {{ NAMESPACE }} get pod -l app=jenkins\
+    \ -o jsonpath='{.items[0].metadata.name}')\nkubectl -n {{ NAMESPACE }} exec -i\
+    \ \"$POD\" -- bash -lc \"\n  cat > /tmp/set-pass.groovy <<'GROOVY'\n  import jenkins.model.*\n\
+    \  import hudson.security.*\n\n  def instance = Jenkins.get()\n  def user = hudson.model.User.get('{{\
+    \ JENKINS_ADMIN_USER }}', false)\n  if (user != null) {\n      def password =\
+    \ '{{ JENKINS_ADMIN_PASS }}'\n      user.addProperty(new hudson.security.HudsonPrivateSecurityRealm.Details(password))\n\
+    \      user.save()\n      println '✅ Updated Jenkins password for {{ JENKINS_ADMIN_USER\
+    \ }}'\n  } else {\n      println '⚠️  Jenkins user {{ JENKINS_ADMIN_USER }} not\
+    \ found'\n  }\n  GROOVY\n  java -jar /usr/share/jenkins/jenkins.war groovy /tmp/set-pass.groovy\n\
+    \"\n"
+  args:
+    executable: /bin/bash
+- name: Show Jenkins service
+  ansible.builtin.shell: kubectl -n {{ NAMESPACE }} get svc jenkins -o wide
+  args:
+    executable: /bin/bash
+  register: svc_out
+- ansible.builtin.debug:
+    msg:
+    - Jenkins → {{ JENKINS_URL }}
+    - '{{ svc_out.stdout }}'

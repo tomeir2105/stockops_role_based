@@ -1,0 +1,1 @@
+ns: '{{ NAMESPACE | default(K8S_NAMESPACE) | default(''observability'') }}'

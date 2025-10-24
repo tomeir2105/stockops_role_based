@@ -1,0 +1,4 @@
+NFS_MOUNTPOINT: '{{ lookup(''vars'', ''NFS_MOUNTPOINT'') }}'
+NFS_EXPORTS_FILE: '{{ lookup(''vars'', ''NFS_EXPORTS_FILE'') }}'
+NFS_ALLOWED_CIDR: '{{ lookup(''vars'', ''NFS_ALLOWED_CIDR'') }}'
+NFS_EXPORT_OPTS: '{{ lookup(''vars'', ''NFS_EXPORT_OPTS'') }}'

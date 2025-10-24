@@ -1,0 +1,59 @@
+- name: Ensure config dir
+  file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: '0755'
+- name: Write join token file on worker
+  copy:
+    dest: /etc/rancher/k3s/node-token
+    mode: '0600'
+    content: '{{ k3s_join_token }}'
+- name: Write /etc/rancher/k3s/config.yaml (no token here)
+  copy:
+    dest: /etc/rancher/k3s/config.yaml
+    mode: '0644'
+    content: 'server: https://{{ k3s_server_ip }}:6443
+
+      node-name: "{{ inventory_hostname | lower }}"
+
+      '
+- name: Check HTTPS connectivity to get.k3s.io (agent, with retries)
+  command: curl -sS --head https://get.k3s.io
+  register: https_check
+  changed_when: false
+  retries: 5
+  delay: 5
+  until: https_check.rc == 0
+- name: Run k3s agent installer (async)
+  shell: "set -e\ncurl -sfL https://get.k3s.io | \\\n  INSTALL_K3S_TYPE=agent \\\n\
+    \  K3S_URL=https://{{ k3s_server_ip }}:6443 \\\n  K3S_TOKEN_FILE=/etc/rancher/k3s/node-token\
+    \ \\\n  sh -\n"
+  args:
+    executable: /bin/bash
+  async: '{{ k3s_async_timeout }}'
+  poll: '{{ k3s_poll_interval }}'
+  register: k3s_install
+- name: Confirm k3s-agent unit file exists
+  stat:
+    path: /etc/systemd/system/k3s-agent.service
+  register: agent_unit_stat
+- name: Fail if k3s-agent unit missing (show installer output)
+  fail:
+    msg: 'k3s agent did not install a systemd unit.
+
+      --- installer stdout ---
+
+      {{ k3s_install.stdout | default('''') }}
+
+      --- installer stderr ---
+
+      {{ k3s_install.stderr | default('''') }}
+
+      '
+  when: not agent_unit_stat.stat.exists
+- name: Start and enable k3s-agent
+  systemd:
+    name: k3s-agent
+    state: started
+    enabled: true
+    daemon_reload: true

@@ -1,0 +1,6 @@
+TZ_VALUE: '{{ TIMEZONE | default(''Asia/Jerusalem'') }}'
+NAMESPACE: '{{ vars[''NAMESPACE'']   | default(''stockops'', true) }}'
+KUBECTL_BIN: '{{ vars[''KUBECTL'']   | default(''/usr/local/bin/kubectl'', true) }}'
+KUBECONFIG_PATH: '{{ vars[''KUBECONFIG''] | default('''', true) }}'
+JENKINS_DEPLOY_NAME: jenkins
+JVM_TZ_OPT: -Duser.timezone={{ TZ_VALUE }}

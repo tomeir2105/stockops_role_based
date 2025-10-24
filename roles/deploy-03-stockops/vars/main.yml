@@ -1,0 +1,4 @@
+ns: '{{ NAMESPACE }}'
+nfs_server_ip: '{{ NFS_SERVER_IP }}'
+influx_pv_path: '{{ NFS_MOUNTPOINT }}/influxdb'
+grafana_pv_path: '{{ NFS_MOUNTPOINT }}/grafana'

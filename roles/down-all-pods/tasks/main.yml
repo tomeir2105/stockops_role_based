@@ -1,0 +1,46 @@
+- name: Get non-system namespaces
+  ansible.builtin.shell: "set -e\nkubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{\"\
+    \\n\"}{end}' \\\n  | egrep -v '^({{ exclude_namespaces | join(\"|\") }})$' ||\
+    \ true\n"
+  args:
+    executable: /bin/bash
+  register: ns_out
+  changed_when: false
+- name: Show target namespaces
+  ansible.builtin.debug:
+    var: ns_out.stdout_lines
+- name: Scale all deployments to 0
+  ansible.builtin.shell: kubectl -n {{ item }} scale deploy --all --replicas=0 ||
+    true
+  args:
+    executable: /bin/bash
+  loop: '{{ ns_out.stdout_lines }}'
+- name: Scale all statefulsets to 0
+  ansible.builtin.shell: kubectl -n {{ item }} scale statefulset --all --replicas=0
+    || true
+  args:
+    executable: /bin/bash
+  loop: '{{ ns_out.stdout_lines }}'
+- name: Delete all daemonsets (cannot scale)
+  ansible.builtin.shell: kubectl -n {{ item }} delete daemonset --all --ignore-not-found=true
+  args:
+    executable: /bin/bash
+  loop: '{{ ns_out.stdout_lines }}'
+- name: Delete all jobs
+  ansible.builtin.shell: kubectl -n {{ item }} delete job --all --ignore-not-found=true
+  args:
+    executable: /bin/bash
+  loop: '{{ ns_out.stdout_lines }}'
+- name: Delete any remaining pods (after scaling controllers)
+  ansible.builtin.shell: kubectl -n {{ item }} delete pod --all --ignore-not-found=true
+  args:
+    executable: /bin/bash
+  loop: '{{ ns_out.stdout_lines }}'
+- name: Summary — pods still running anywhere
+  ansible.builtin.shell: kubectl get pods -A -o wide
+  args:
+    executable: /bin/bash
+  register: pods_now
+  changed_when: false
+- ansible.builtin.debug:
+    msg: '{{ pods_now.stdout }}'

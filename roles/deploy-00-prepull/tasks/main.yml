@@ -1,0 +1,31 @@
+- name: Skip pre-pull on hosts without k3s installed
+  ansible.builtin.debug:
+    msg: 'Skipping pre-pull: k3s is not installed/running on this host (k3s_unit=none).'
+  when: k3s_unit == "none"
+- name: Pre-pull images via containerd
+  ansible.builtin.shell: 'set -euo pipefail
+
+    k3s ctr --debug images pull --platform "{{ IMAGE_PLATFORM }}" "{{ item }}"
+
+    '
+  args:
+    executable: /bin/bash
+  register: pull_result
+  retries: 3
+  delay: 10
+  until: pull_result.rc == 0
+  loop: '{{ PREPULL_IMAGES }}'
+  when: k3s_unit != "none"
+- name: Verify images present locally
+  ansible.builtin.shell: 'k3s ctr images ls | egrep ''influxdb|grafana'' || true
+
+    '
+  args:
+    executable: /bin/bash
+  register: verify_out
+  changed_when: false
+  when: k3s_unit != "none"
+- name: Print local images summary
+  ansible.builtin.debug:
+    var: verify_out.stdout
+  when: k3s_unit != "none"

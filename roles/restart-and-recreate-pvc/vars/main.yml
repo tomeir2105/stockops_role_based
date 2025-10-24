@@ -1,0 +1,3 @@
+KUBECONFIG_PATH: /etc/rancher/k3s/k3s.yaml
+NS: '{{ NAMESPACE | default(''stockops'') }}'
+KUBECTL: '{{ KUBECTL | default(''kubectl'') }}'

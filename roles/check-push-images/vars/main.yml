@@ -1,0 +1,10 @@
+work_dir: '{{ playbook_dir }}/.image_sync'
+images_list_file: '{{ work_dir }}/images.txt'
+images_parsed_json: '{{ work_dir }}/images_parsed.json'
+hub_repo_prefix_effective: '{{ hub_repo_prefix | default(dockerhub_username) }}'
+registry_host_effective: docker.io
+wanted_names:
+- grafana
+- influxdb
+- jenkins
+ensure_latest_tag_effective: '{{ (ensure_latest_tag | default(false)) | bool }}'
